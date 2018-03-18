@@ -1,0 +1,4 @@
+<!-- -->
+```{r opts.label="run_code_chunk"}
+write_bib(file="citations.bibtex")
+```

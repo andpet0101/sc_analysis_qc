@@ -1,0 +1,18 @@
+* Sample names should have the following format:
+    * **Name**\_**PlateNumber**\_**Row****Col**
+    * **PlateNumber** is the number of the plate done in the experiment without leading zeros
+    * **Row** is the row in the plate and can be A-H
+    * **Col** is the column in the plate and can be 1-12 without leading zeros
+* Plate wells can be left empty
+* **Name** identifies the actual sample in the well:
+    * All samples with the same **Name** belong to one sample group (e.g. the same tissue or the same condition)
+    * An optional suffix (max three letters) separated by a dot can be used to identify individual samples, e.g. MyGroup.1 is the individual 1 of MyGroup
+* Reserved **Name** are:
+    * RNA or UHR: positive control with RNA as material
+    * NC: negative control without any material
+    * BLK: bulk control with multiple cells as material
+    * for future purposes, **Name** can also be a database identifier
+
+```{r}
+print(1)
+```

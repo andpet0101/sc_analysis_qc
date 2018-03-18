@@ -1,0 +1,1080 @@
+---
+title: "Single Cell Report"
+author:
+- affiliation: Deep Sequencing Group, TU Dresden
+  name: Andreas Petzold
+documentclass: article
+output:
+  pdf_document:
+    citation_package: natbib
+    fig_caption: yes
+    highlight: tango
+    includes:
+      in_header: custom_figure_environment.tex
+    keep_tex: yes
+    number_sections: yes
+    toc: yes
+    toc_depth: 2
+  html_document:
+    df_print: paged
+    fig_caption: yes
+    highlight: tango
+    number_sections: yes
+    theme: sandstone
+    toc: yes
+    toc_depth: 2
+geometry: margin=2cm
+fontsize: 11pt
+params:
+  annotation: '87'
+  bfxid: bfx893
+  countsdata: 
+    value:
+      ../genecount/bfx893.hg38.e87.txt
+  species: homo_sapiens
+  workingdir: '.',
+  sourcedir: '.'
+classoption: a4paper
+---
+
+```{r include=F,echo=F,cache=F}
+show_code = F
+```
+
+<!--
+####################
+# SETUP OF PROJECT #
+####################
+-->
+
+`r ifelse(show_code,"# Initial code","")`
+`r ifelse(show_code,"## Configuration","")`
+
+<!-- Knitr configuration chunk; should always be first and should not be cached -->
+```{r knitr_configuration, include=show_code,echo=show_code,cache=F,tidy=T}
+############ knitr ############ 
+library(knitr)
+
+# working directory
+if('workingdir' %in% names(params)){
+  if(!file.exists(params$workingdir))stop("Specified working directory does not exist!")
+  workingdir = params$workingdir
+}else{
+  stop("Please specify a working directory!")
+}
+opts_knit$set(root.dir = params$workingdir)
+
+# source directory
+if('workingdir' %in% names(params)){
+  if(!file.exists(params$workingdir))stop("Specified working directory does not exist!")
+  workingdir = params$workingdir
+}else{
+  stop("Please specify a working directory!")
+}
+opts_knit$set(root.dir = params$workingdir)
+
+# this should guarantee read/write permission for user and group
+Sys.umask(mode=0002)
+
+# pdf directory (do not change; set for fig.path)
+pdfdir = file.path('figures');
+dir.create(pdfdir, showWarnings = FALSE)
+
+# global knitr options: output and include commands, errors, warnings and messages? ; also cache chunks
+opts_chunk$set(echo=show_code,include=show_code,error=F,warning = F,message=F,cache=T)
+
+# knitr option template code_chunk: do not include in output (just run)
+opts_template$set(code_chunk=list(include=show_code,results="hide",tidy=T))
+
+# knitr option template plot_chunk: include code in output; 150 dpi resolution; additionally saved in figures directory; centered; flush all plots at the end of the chunk
+opts_template$set(plot_chunk=list(include=T,dpi=150,fig.path="figures/",fig.align="center",fig.show="hold"))
+
+# knitr option template for table_chunk: include code in output; print output as is (do not interprete markdown syntax)
+opts_template$set(table_chunk=list(include=T,results="asis"))
+
+# knitr table options: table format markdown, round to 0 digits and format number with decimal and big mark
+options(knitr.table.format='pandoc',knitr.table.digits=0,knitr.table.format.args = list(decimal.mark = ".", big.mark = ","))
+
+# knitr: base path to search for rmarkdown child documents
+rmarkdown_dir = file.path('rmarkdown/')
+opts_knit$set(child.path=rmarkdown_dir)
+
+# this is a (strange) hack to inject a new figure environment into latex
+#
+# the code is written into the file custom_figure_environment.tex which is then included into the tex file
+# as specified by the YAML header
+tex_lines = c('\\usepackage{float}','\\let\\origfigure\\figure','\\let\\endorigfigure\\endfigure',
+'\\renewenvironment{figure}[1][2] {\\expandafter\\origfigure\\expandafter[H]}{\\endorigfigure}')
+writeLines(tex_lines,'custom_figure_environment.tex')
+
+```
+
+<!-- general configuration chunk -->
+```{r configuration, opts.label='code_chunk'}
+############ configuration ############ 
+library(gridExtra)
+library(scater)
+library(dplyr)
+library(Matrix)
+
+# avoids some nasty pitfalls
+options(stringsAsFactors = FALSE)
+
+# project-specific params
+if(!exists('params')) stop(paste("Please provide a 'params' section in the YAML header of this file or use rmarkdown::render to run this file with parameters!"))
+
+# config parameter: species
+if(!'species' %in% names(params))stop("Missing a species ('species') entry in the 'params' section!")
+species = params$species
+
+# config parameter: annotation
+if(!'annotation' %in% names(params))stop("Missing a annotation version ('annotation') entry in the 'params' section! Can be an Ensembl version or a path to a file.")
+annotation = as.integer(params$annotation)
+
+# config parameter: bfxid
+if(!'bfxid' %in% names(params))stop("Missing a bfx id ('bfxid') entry in the 'params' section!")
+bfxid = tolower(params$bfxid)
+if(!grepl('^bfx\\d+$',bfxid))stop("Bfx id has to be of format bfx[0-9]+.")
+
+# config parameter: countdata
+if(!'countsdata' %in% names(params))stop("Missing a counts table ('countsdata') entry in the 'params' section!")
+countsdata = params$countsdata
+
+# data directory for tables etc.
+datadir = file.path('data')
+dir.create(datadir, showWarnings = FALSE)
+
+# read in R codes
+read_chunk(file.path(rmarkdown_dir,'setup_sce_singlecell_object.R'),labels='setup_sce_functions.R')
+```
+
+<!-- additional functions: run R code chunk additional_functions -->
+`r ifelse(show_code,"## Additional functions","")`
+```{r setup_sce_functions,opts.label="code_chunk",dependson='configuration'}
+source(file.path(rmarkdown_dir,'setup_sce_functions.R'))
+```
+
+<!-- setup of scater object and compute basic QC -->
+`r ifelse(show_code,"## Scater object","")`
+```{r scater_setup, opts.label="code_chunk",dependson='setup_sce_functions'}
+
+# create sce object
+sce = create_sce_from_featurecounts(countsdata) %>% 
+  parse_plate_information() %>% 
+  assign_group_information() %>%
+  fetch_sample_library_info_from_labweb(bfxid=bfxid) %>%
+  add_gene_annotation(annotation=annotation,species=species)
+
+# add combined library and sample concentration status based on smart rules from susanner
+sample_info = as.data.frame(colData(sce))
+sample_info_rownames = rownames(sample_info)
+
+sample_library_conc_status = function(sampleconc,libraryconc){
+   if(is.na(sampleconc) | is.na(libraryconc)) return(NA) else
+     if(sampleconc>=0.4 & libraryconc>=3) return("pass") else
+       if(sampleconc<0.4 & libraryconc<3) return("fail") else
+         if(sampleconc>=0.4 & libraryconc<3) return("libfail") else
+           if(sampleconc<0.4 & libraryconc>=3) return("samplefail")
+   else return(NA)
+}
+
+sample_info = sample_info %>% rowwise() %>% dplyr::mutate(SampleLibraryConcentrationStatus = sample_library_conc_status(SampleConcentration,LibraryConcentration)) %>% as.data.frame()
+rownames(sample_info) = sample_info_rownames
+sample_info$SampleLibraryConcentrationStatus = factor(sample_info$SampleLibraryConcentrationStatus,levels=c("pass","libfail","samplefail","fail"))
+ colData(sce) = DataFrame(sample_info,row.names=rownames(sample_info))
+
+# run basic QC
+gene_info = as.data.frame(rowData(sce))
+ercc_inds = which(isSpike(sce,"ERCC"))
+mito_inds = which(gene_info[,"chromosome_name"]=="MT")
+rRNA_inds = which(gene_info[,"gene_biotype"] %in% c("rRNA","Mt_rRNA"))
+
+sample_info = as.data.frame(colData(sce))
+posctrl_inds = which(sample_info[,"ControlType"]=="PosCtrl")
+negctrl_inds = which(sample_info[,"ControlType"]=="NegCtrl")
+bulkctrl_inds = which(sample_info[,"ControlType"]=="BulkCtrl")
+
+sce = calculateQCMetrics(sce, feature_controls=list(ERCC=ercc_inds, Mt=mito_inds,rRNA=rRNA_inds),
+                         cell_controls=list(PosCtrl=posctrl_inds,NegCtrl=negctrl_inds,BulkCtrl = bulkctrl_inds))
+
+# add 
+
+```
+
+```{r setup_done, opts.label="code_chunk",dependson='scater_setup'}
+# just record number of plates, number of groups and number of groups without controls
+sample_info = as.data.frame(colData(sce))
+num_of_plates = length(unique(sample_info$PlateNumber))
+num_of_groups = length(unique(sample_info$Group))
+num_of_groups_wo_ctrls = length(unique(sample_info[!sample_info$IsControl,"Group"]))
+
+# have plates
+have_plates = sum(c("PlateNumber","Row","Col") %in% colnames(sample_info))==3
+# have sample/library conc
+have_sample_library_conc = !all(is.na(sample_info$SampleLibraryConcentrationStatus))
+
+# store colData in variable sample_info
+sample_info = as.data.frame(colData(sce))
+```
+
+<!--
+###################
+# SAMPLE OVERVIEW #
+###################
+-->
+
+# Sample overview
+
+<!-- table with samples -->
+```{r sample_overview_table, opts.label="table_chunk",dependson="setup_done"}
+# Creates the sample overview table
+sample_info = as.data.frame(colData(sce))
+sample_overview_table = sample_info %>% group_by(Group,ControlType) %>%
+  summarise(Samples=length(Group),
+            Mean_reads=mean(total_counts),
+            Sd_reads=sd(total_counts),
+            Mean_genes=mean(total_features),
+            Sd_genes=sd(total_features)) %>% as.data.frame()
+sample_overview_table = rbind(sample_overview_table,
+                              data.frame(
+                                Group=c("Total"),ControlType=c(""),
+                                Samples=sum(sample_overview_table$Samples),
+                                Mean_reads=mean(sample_info$total_counts),
+                                Sd_reads=sd(sample_info$total_counts),
+                                Mean_genes=mean(sample_info$total_features),
+                                Sd_genes=sd(sample_info$total_features)))
+
+kable(sample_overview_table,col.names=c("Group","Type","Samples","Reads (mean)","Reads (sd)","Genes (mean)","Genes (sd)"),caption="Sample overview",format.args = list(decimal.mark = ".", big.mark = ","),digits=0)
+```
+
+<!-- plate plot showing the different sample groups; only included when we have plate info -->
+```{r sample_overview_by_plate,opts.label="plot_chunk",fig.width=getPlatePlotWidth(num_of_plates),fig.height=getPlatePlotHeight(num_of_plates)+0.5,fig.cap="Sample overview by plate: Plate positions are coloured by sample group. Labels indicate (B)ulk, (P)ositive and (N)egative controls.",dependson="setup_done",eval=have_plates}
+plotByPlate(sce,colour_by="Group",mark_ctrls=T,ctrl_col="IsControl",ctrl_label="CtrlLabel",ctrl_colour="black")
+```
+
+<!-- plate plot showing sample and library concentration status for samplesups; only included when we have plate info and sample/library concentration-->
+```{r sample_library_conc_by_plate,opts.label="plot_chunk",fig.width=getPlatePlotWidth(num_of_plates),fig.height=getPlatePlotHeight(num_of_plates),fig.cap="Input sample/library by plate: Plate positions are coloured by sample/library status. Labels indicate (B)ulk, (P)ositive and (N)egative controls.",dependson="setup_done",eval=have_plates & have_sample_library_conc}
+# plate plot by sample/library (concentration) status
+plotByPlate(sce,colour_by="SampleLibraryConcentrationStatus",mark_ctrls=T,ctrl_col="IsControl",ctrl_label="CtrlLabel",ctrl_colour="black",colour_by_legend="Status") + 
+  scale_fill_manual("Concentration",values=c("fail"="red2","libfail" = "yellow2","samplefail"="orange2","pass" = "green2"),
+                    labels=c("fail"="both low","libfail" = "library low","samplefail"="sample low","pass" = "both okay"),na.value="lightgrey")
+```
+
+# Quality Control
+## Number of reads
+
+```{r num_reads_qc_summary_table,opts.label="table_chunk",dependson="setup_done"}
+# create summary table
+num_reads_qc_summary = sample_info %>% group_by(Group) %>% 
+  do(data.frame(Cells=length(.$Group),
+                Q25=as.vector(quantile(.$total_counts,probs=0.25)),
+                Median=median(.$total_counts),
+                Q75=as.vector(quantile(.$total_counts,probs=0.75)),
+                Total=sum(.$total_counts))) %>% as.data.frame()
+
+# add last row
+num_reads_qc_summary = rbind(num_reads_qc_summary,
+                             data.frame(Group=c("Overall"),
+                               Cells=sum(num_reads_qc_summary$Cells),
+                               Q25=as.vector(quantile(sample_info$total_counts,probs=0.25)),
+                               Median=median(sample_info$total_counts),
+                               Q75=as.vector(quantile(sample_info$total_counts,probs=0.75)),
+                               Total=sum(sample_info$total_counts)))
+
+# output as markdown
+kable(num_reads_qc_summary,col.names=c("Group","Cells","Q25","Median","Q75","Overall"),
+              caption="Read numbers by group",digits=0,format.args = list(decimal.mark = ".", big.mark = ","),row.names = F)
+
+```
+
+```{r num_reads_violin_plot,opts.label="plot_chunk",fig.width=7,fig.height=2,fig.cap="Number of reads: Violin density plots are shown for the complete dataset (left panel) and for each sample group separately (right panel). Smaller boxplots indicate 25th, 50th and 75th percentiles as well as outliers.",dependson="setup_done"}
+# prepare violin plots
+num_reads_plot1 = ggplot(sample_info,aes(x=c(1),y=total_counts)) + 
+  geom_violin(fill="lightgrey") +
+  geom_boxplot(width=.1) +
+  scale_x_discrete("All",labels=c("All")) +
+  scale_y_continuous("Number of reads",label=comma) +
+  theme_bw(8) 
+  
+num_reads_plot2 = ggplot(sample_info,aes(x=Group,y=total_counts,fill=Group)) + 
+  geom_violin(scale="width")+
+  geom_boxplot(width=.1,fill="white") +
+  scale_x_discrete("Sample group") +
+  scale_y_continuous("Number of reads",label=comma) +
+  theme_bw(8) +
+  theme(legend.position = "none") +
+  theme(axis.title.x = element_blank(),axis.text.x = element_text(angle=90))
+
+num_reads_plot1_gt = ggplot_gtable(ggplot_build(num_reads_plot1+theme(axis.title.x=element_blank())))
+num_reads_plot2_gt = ggplot_gtable(ggplot_build(num_reads_plot2+theme(axis.title.y=element_blank())))
+num_reads_plot1_gt$heights = num_reads_plot2_gt$heights
+
+grid.arrange(
+  num_reads_plot1_gt,
+  num_reads_plot2_gt,
+  ncol=2,widths=c(0.33,0.66))
+```
+
+## Number of genes
+
+```{r num_genes_qc_summary_table,opts.label="table_chunk",dependson="setup_done"}
+# create summary table
+num_genes_qc_summary = sample_info %>% group_by(Group) %>% 
+  do(data.frame(Cells=length(.$Group),
+                Q25=as.vector(quantile(.$total_features,probs=0.25)),
+                Median=median(.$total_features),
+                Q75=as.vector(quantile(.$total_features,probs=0.75)))) %>% as.data.frame()
+
+genes_per_group = sample_info %>% group_by(Group) %>%
+  do(data.frame(Overall=sum(rowSums(counts(sce[,colnames(sce) %in% .$Name])>0)>0))) %>% as.data.frame()
+
+num_genes_qc_summary = cbind(num_genes_qc_summary,genes_per_group[,"Overall",drop=F])
+
+# add last row
+num_genes_qc_summary = rbind(num_genes_qc_summary,
+                    data.frame(Group=c("Overall"),
+                               Cells=sum(num_genes_qc_summary$Cells),
+                               Q25=as.vector(quantile(sample_info$total_features,probs=0.25)),
+                               Median=median(sample_info$total_features),
+                               Q75=as.vector(quantile(sample_info$total_features,probs=0.75)),
+                               Overall=nrow(sce)))
+
+# output as markdown
+kable(num_genes_qc_summary,col.names=c("Group","Cells","Q25","Median","Q75","Overall"),
+              caption="Gene numbers by group",digits=0,format.args = list(decimal.mark = ".", big.mark = ","),row.names = F)
+```
+
+```{r num_genes_violin_plot,opts.label="plot_chunk",fig.width=7,fig.height=2,fig.cap="Number of genes: Violin density plots are shown for the complete dataset (left panel) and for each sample group separately (right panel). Smaller boxplots indicate 25th, 50th and 75th percentiles as well as outliers.",dependson="scater_setup"}
+# prepare violin plots
+num_genes_plot1 = ggplot(sample_info,aes(x=c(1),y=total_features)) + 
+  geom_violin(fill="lightgrey") +
+  geom_boxplot(width=.1) +
+  scale_x_discrete("All",labels=c("All")) +
+  scale_y_continuous("Number of genes",label=comma) +
+  theme_bw(8) 
+  
+num_genes_plot2 = ggplot(sample_info,aes(x=Group,y=total_features,fill=Group)) + 
+  geom_violin(scale="width")+
+  geom_boxplot(width=.1,fill="white") +
+  scale_x_discrete("Sample group") +
+  scale_y_continuous("Number of genes",label=comma) +
+  theme_bw(8) +
+  theme(legend.position = "none") +
+  theme(axis.title.x = element_blank(),axis.text.x = element_text(angle=90))
+
+num_genes_plot1_gt = ggplot_gtable(ggplot_build(num_genes_plot1+theme(axis.title.x=element_blank())))
+num_genes_plot2_gt = ggplot_gtable(ggplot_build(num_genes_plot2+theme(axis.title.y=element_blank())))
+num_genes_plot1_gt$heights = num_genes_plot2_gt$heights
+
+grid.arrange(
+  num_genes_plot1_gt,
+  num_genes_plot2_gt,
+  ncol=2,widths=c(0.33,0.66))
+```
+
+## Mitochondrial content
+
+```{r num_mito_qc_table,opts.label="table_chunk",dependson="scater_setup"}
+# create summary table
+mito_content_qc_summary = sample_info %>% group_by(Group) %>% 
+  do(data.frame(Cells=length(.$Group),
+                Q25=as.vector(quantile(.$pct_counts_Mt,probs=0.25)),
+                Median=median(.$pct_counts_Mt),
+                Q75=as.vector(quantile(.$pct_counts_Mt,probs=0.75)))) %>% as.data.frame()
+
+# add last row
+mito_content_qc_summary = rbind(mito_content_qc_summary,
+                   data.frame(Group=c("Overall"),
+                              Cells=sum(mito_content_qc_summary$Cells),
+                              Q25=as.vector(quantile(sample_info$pct_counts_Mt,probs=0.25)),
+                              Median=median(sample_info$pct_counts_Mt),
+                              Q75=as.vector(quantile(sample_info$pct_counts_Mt,probs=0.75))))
+
+# output as markdown
+kable(mito_content_qc_summary,col.names=c("Group","Cells","Q25","Median","Q75"),
+             caption="Mitochondrial content by group",digits=1,format.args = list(decimal.mark = ".", big.mark = ","))
+```
+
+```{r mito_content_violin_plot,opts.label="plot_chunk",fig.width=7,fig.height=2,fig.cap="Mitochondrial content: Violin density plots are shown for the complete dataset (left panel) and for each sample group separately (right panel). Smaller boxplots indicate 25th, 50th and 75th percentiles as well as outliers.",dependson="scater_setup"}
+# prepare violin plots
+mito_content_plot1 = ggplot(sample_info,aes(x=c(1),y=pct_counts_Mt)) + 
+  geom_violin(fill="lightgrey") +
+  geom_boxplot(width=.1) +
+  scale_x_discrete("All",labels=c("All")) +
+  scale_y_continuous("Mitochondrial content (%)") +
+  theme_bw(8) 
+  
+mito_content_plot2 = ggplot(sample_info,aes(x=Group,y=pct_counts_Mt,fill=Group)) + 
+  geom_violin(scale="width")+
+  geom_boxplot(width=.1,fill="white") +
+  scale_x_discrete("Sample group") +
+  scale_y_continuous("Mitochondrial content (%)") +
+  theme_bw(8) +
+  theme(legend.position = "none") +
+  theme(axis.title.x = element_blank(),axis.text.x = element_text(angle=90))
+
+mito_content_plot1_gt = ggplot_gtable(ggplot_build(mito_content_plot1+theme(axis.title.x=element_blank())))
+mito_content_plot2_gt = ggplot_gtable(ggplot_build(mito_content_plot2+theme(axis.title.y=element_blank())))
+mito_content_plot1_gt$heights = mito_content_plot2_gt$heights
+
+grid.arrange(
+  mito_content_plot1_gt,
+  mito_content_plot2_gt,
+  ncol=2,widths=c(0.33,0.66))
+```
+
+## ERCC 
+
+```{r num_ercc_qc_table,opts.label="table_chunk",dependson="run_ercc_qc"}
+# create summary table
+ercc_content_qc_summary = sample_info %>% group_by(Group) %>% 
+  do(data.frame(Cells=length(.$Group),
+                Q25=as.vector(quantile(.$pct_counts_ERCC,probs=0.25)),
+                Median=median(.$pct_counts_ERCC),
+                Q75=as.vector(quantile(.$pct_counts_ERCC,probs=0.75)))) %>% as.data.frame()
+
+# add last row
+ercc_content_qc_summary = rbind(ercc_content_qc_summary,
+                   data.frame(Group=c("Overall"),
+                              Cells=sum(sample_info$Cells),
+                              Q25=as.vector(quantile(sample_info$pct_counts_ERCC,probs=0.25)),
+                              Median=median(sample_info$pct_counts_ERCC),
+                              Q75=as.vector(quantile(sample_info$pct_counts_ERCC,probs=0.75))))
+
+# output as markdown
+kable(ercc_content_qc_summary,col.names=c("Group","Cells","Q25","Median","Q75"),
+             caption="ERCC content by group",digits=1,format.args = list(decimal.mark = ".", big.mark = ","))
+```
+
+```{r ercc_content_violin_plot,opts.label="plot_chunk",fig.width=7,fig.height=2,fig.cap="ERCC content: Violin density plots are shown for the complete dataset (left panel) and for each sample group separately (right panel). Smaller boxplots indicate 25th, 50th and 75th percentiles as well as outliers.",dependson="scater_setup"}
+# prepare violin plots
+ercc_content_plot1 = ggplot(sample_info,aes(x=c(1),y=pct_counts_ERCC)) + 
+  geom_violin(fill="lightgrey") +
+  geom_boxplot(width=.1) +
+  scale_x_discrete("All",labels=c("All")) +
+  scale_y_continuous("ERCC content (%)") +
+  theme_bw(8) 
+  
+ercc_content_plot2 = ggplot(sample_info,aes(x=Group,y=pct_counts_ERCC,fill=Group)) + 
+  geom_violin(scale="width")+
+  geom_boxplot(width=.1,fill="white") +
+  scale_x_discrete("Sample group") +
+  scale_y_continuous("ERCC content (%)") +
+  theme_bw(8) +
+  theme(legend.position = "none") +
+  theme(axis.title.x = element_blank(),axis.text.x = element_text(angle=90))
+
+ercc_content_plot1_gt = ggplot_gtable(ggplot_build(ercc_content_plot1+theme(axis.title.x=element_blank())))
+ercc_content_plot2_gt = ggplot_gtable(ggplot_build(ercc_content_plot2+theme(axis.title.y=element_blank())))
+ercc_content_plot1_gt$heights = ercc_content_plot2_gt$heights
+
+grid.arrange(
+  ercc_content_plot1_gt,
+  ercc_content_plot2_gt,
+  ncol=2,widths=c(0.33,0.66))
+```
+
+
+## Dependency on sample/library concentration
+
+```{r analyse_num_reads_vs_sample_lib_conc,opts.label="code_chunk",dependson="scater_setup"}
+# calculate linear models for read number/library vs sample concentration, add labels
+#
+# set status for linear dependency on sample concentration
+# - at least SignLevel **
+# - at least Adj-RSquared 0.5 **
+# - at least absolute correlation of 0.3
+sampleconc_vs_readnum_lms = sample_info %>% 
+  group_by(Group) %>% 
+  do(fit_linear_model(as.data.frame(.),"total_counts ~ SampleConcentration")) %>%
+  mutate(
+    Label = ifelse(is.na(Correlation),NA,
+                   as.character(as.expression(
+      substitute(italic(r) == c*","~italic(R)^2 == r2*","~p,list(c=round(Correlation,2),r2=round(AdjRsquared,2),p=as.character(SignLevel)))
+      ))),
+    LabelPosX = min(sample_info[as.character(sample_info$Group)==as.character(Group),"SampleConcentration"]),
+    LabelPosY = max(sample_info[as.character(sample_info$Group)==as.character(Group),"total_counts"])
+  ) %>%
+  mutate(LinearDependency = SignLevel>="**" & AdjRsquared>=0.5 & abs(Correlation)>=0.3) %>% as.data.frame()
+rownames(sampleconc_vs_readnum_lms) = sampleconc_vs_readnum_lms$Group
+
+libraryconc_vs_readnum_lms = sample_info %>% 
+  group_by(Group) %>% 
+  do(fit_linear_model(as.data.frame(.),"total_counts ~ LibraryConcentration")) %>%
+  mutate(
+    Label = ifelse(is.na(Correlation),NA,
+                   as.character(as.expression(
+      substitute(italic(r) == c*","~italic(R)^2 == r2*","~p,list(c=round(Correlation,2),r2=round(AdjRsquared,2),p=as.character(SignLevel)))
+      ))),
+    LabelPosX = min(sample_info[as.character(sample_info$Group)==as.character(Group),"LibraryConcentration"]),
+    LabelPosY = max(sample_info[as.character(sample_info$Group)==as.character(Group),"total_counts"])
+  ) %>% 
+  mutate(LinearDependency = SignLevel>="**" & AdjRsquared>=0.5 & abs(Correlation)>=0.3) %>% as.data.frame()
+rownames(libraryconc_vs_readnum_lms) = libraryconc_vs_readnum_lms$Group
+```
+
+```{r num_reads_qc_conc_table,opts.label="table_chunk",dependson="analyse_num_reads_vs_sample_lib_conc",results="asis"}
+# create table for sample and library concentration correlations
+num_reads_qc_conc_table = sampleconc_vs_readnum_lms[,c("Group"),drop=F]
+num_reads_qc_conc_table$SampleConcDepend = ifelse(!sampleconc_vs_readnum_lms$LinearDependency,"no",
+paste0("r = ",round(sampleconc_vs_readnum_lms$Correlation,2),", *R^2^* = ",round(sampleconc_vs_readnum_lms$AdjRsquared,2),", ",sampleconc_vs_readnum_lms$SignLevel))
+
+num_reads_qc_conc_table$LibraryConcDepend = ifelse(!libraryconc_vs_readnum_lms$LinearDependency,"no",
+paste0("r = ",round(libraryconc_vs_readnum_lms$Correlation,2),", *R^2^* = ",round(libraryconc_vs_readnum_lms$AdjRsquared,2),", ",libraryconc_vs_readnum_lms$SignLevel))
+
+kable(num_reads_qc_conc_table,col.names=c("Group","Sample concentration","Library concentration"),
+              caption="Correlation between number of reads and sample/library concentration",digits=0,format.args = list(decimal.mark = ".", big.mark = ","),row.names = F)
+```
+
+```{r analyse_num_genes_vs_sample_lib_conc,opts.label="code_chunk",dependson="scater_setup"}
+# calculate linear models for gene number/library vs sample concentration, add labels
+#
+# set status for linear dependency on sample concentration
+# - at least SignLevel **
+# - at least Adj-RSquared 0.5 **
+# - at least absolute correlation of 0.3
+sampleconc_vs_genesnum_lms = sample_info %>% 
+  group_by(Group) %>% 
+  do(fit_linear_model(as.data.frame(.),"total_features ~ SampleConcentration")) %>%
+  mutate(
+    Label = ifelse(is.na(Correlation),NA,
+                   as.character(as.expression(
+      substitute(italic(r) == c*","~italic(R)^2 == r2*","~p,list(c=round(Correlation,2),r2=round(AdjRsquared,2),p=as.character(SignLevel)))
+      ))),
+    LabelPosX = min(sample_info[as.character(sample_info$Group)==as.character(Group),"SampleConcentration"]),
+    LabelPosY = max(sample_info[as.character(sample_info$Group)==as.character(Group),"total_features"])
+  ) %>%
+  mutate(LinearDependency = SignLevel>="**" & AdjRsquared>=0.5 & abs(Correlation)>=0.3) %>% as.data.frame()
+rownames(sampleconc_vs_genesnum_lms) = sampleconc_vs_genesnum_lms$Group
+
+libraryconc_vs_genesnum_lms = sample_info %>% 
+  group_by(Group) %>% 
+  do(fit_linear_model(as.data.frame(.),"total_features ~ LibraryConcentration")) %>%
+  mutate(
+    Label = ifelse(is.na(Correlation),NA,
+                   as.character(as.expression(
+      substitute(italic(r) == c*","~italic(R)^2 == r2*","~p,list(c=round(Correlation,2),r2=round(AdjRsquared,2),p=as.character(SignLevel)))
+      ))),
+    LabelPosX = min(sample_info[as.character(sample_info$Group)==as.character(Group),"LibraryConcentration"]),
+    LabelPosY = max(sample_info[as.character(sample_info$Group)==as.character(Group),"total_features"])
+  ) %>% 
+  mutate(LinearDependency = SignLevel>="**" & AdjRsquared>=0.5 & abs(Correlation)>=0.3) %>% as.data.frame()
+rownames(libraryconc_vs_genesnum_lms) = libraryconc_vs_genesnum_lms$Group
+```
+
+```{r num_genes_qc_conc_table,opts.label="table_chunk",dependson="analyse_num_genes_vs_sample_lib_conc",results="asis"}
+# create table for sample and library concentration correlations
+num_genes_qc_conc_table = sampleconc_vs_genesnum_lms[,c("Group"),drop=F]
+num_genes_qc_conc_table$SampleConcDepend = ifelse(!sampleconc_vs_genesnum_lms$LinearDependency,"no",
+paste0("r = ",round(sampleconc_vs_genesnum_lms$Correlation,2),", *R^2^* = ",round(sampleconc_vs_genesnum_lms$AdjRsquared,2),", ",sampleconc_vs_genesnum_lms$SignLevel))
+
+num_genes_qc_conc_table$LibraryConcDepend = ifelse(!libraryconc_vs_genesnum_lms$LinearDependency,"no",
+paste0("r = ",round(libraryconc_vs_genesnum_lms$Correlation,2),", *R^2^* = ",round(libraryconc_vs_genesnum_lms$AdjRsquared,2),", ",libraryconc_vs_genesnum_lms$SignLevel))
+
+kable(num_genes_qc_conc_table,col.names=c("Group","Sample concentration","Library concentration"),
+              caption="Correlation between number of genes and sample/library concentration",digits=0,format.args = list(decimal.mark = ".", big.mark = ","),row.names = F)
+```
+
+```{r analyse_mito_vs_sample_lib_conc,opts.label="code_chunk",dependson="scater_setup"}
+# calculate linear models for mito content/library vs sample concentration, add labels
+#
+# set status for linear dependency on sample concentration
+# - at least SignLevel **
+# - at least Adj-RSquared 0.5 **
+# - at least absolute correlation of 0.3
+sampleconc_vs_mito_lms = sample_info %>% 
+  group_by(Group) %>% 
+  do(fit_linear_model(as.data.frame(.),"pct_counts_Mt ~ SampleConcentration")) %>%
+  mutate(
+    Label = ifelse(is.na(Correlation),NA,
+                   as.character(as.expression(
+      substitute(italic(r) == c*","~italic(R)^2 == r2*","~p,list(c=round(Correlation,2),r2=round(AdjRsquared,2),p=as.character(SignLevel)))
+      ))),
+    LabelPosX = min(sample_info[as.character(sample_info$Group)==as.character(Group),"SampleConcentration"]),
+    LabelPosY = max(sample_info[as.character(sample_info$Group)==as.character(Group),"pct_counts_Mt"])
+  ) %>%
+  mutate(LinearDependency = SignLevel>="**" & AdjRsquared>=0.5 & abs(Correlation)>=0.3) %>% as.data.frame()
+rownames(sampleconc_vs_mito_lms) = sampleconc_vs_mito_lms$Group
+
+libraryconc_vs_mito_lms = sample_info %>% 
+  group_by(Group) %>% 
+  do(fit_linear_model(as.data.frame(.),"pct_counts_Mt ~ LibraryConcentration")) %>%
+  mutate(
+    Label = ifelse(is.na(Correlation),NA,
+                   as.character(as.expression(
+      substitute(italic(r) == c*","~italic(R)^2 == r2*","~p,list(c=round(Correlation,2),r2=round(AdjRsquared,2),p=as.character(SignLevel)))
+      ))),
+    LabelPosX = min(sample_info[as.character(sample_info$Group)==as.character(Group),"LibraryConcentration"]),
+    LabelPosY = max(sample_info[as.character(sample_info$Group)==as.character(Group),"pct_counts_Mt"])
+  ) %>% 
+  mutate(LinearDependency = SignLevel>="**" & AdjRsquared>=0.5 & abs(Correlation)>=0.3) %>% as.data.frame()
+rownames(libraryconc_vs_mito_lms) = libraryconc_vs_mito_lms$Group
+```
+
+```{r mito_qc_conc_table,opts.label="table_chunk",dependson="analyse_mito_vs_sample_lib_conc",results="asis"}
+# create table for sample and library concentration correlations
+mito_qc_conc_table = sampleconc_vs_mito_lms[,c("Group"),drop=F]
+mito_qc_conc_table$SampleConcDepend = ifelse(!sampleconc_vs_mito_lms$LinearDependency,"no",
+paste0("r = ",round(sampleconc_vs_mito_lms$Correlation,2),", *R^2^* = ",round(sampleconc_vs_mito_lms$AdjRsquared,2),", ",sampleconc_vs_mito_lms$SignLevel))
+
+mito_qc_conc_table$LibraryConcDepend = ifelse(!libraryconc_vs_mito_lms$LinearDependency,"no",
+paste0("r = ",round(libraryconc_vs_mito_lms$Correlation,2),", *R^2^* = ",round(libraryconc_vs_mito_lms$AdjRsquared,2),", ",libraryconc_vs_mito_lms$SignLevel))
+
+kable(mito_qc_conc_table,col.names=c("Group","Sample concentration","Library concentration"),
+              caption="Correlation between mitochondrial content and sample/library concentration",digits=0,format.args = list(decimal.mark = ".", big.mark = ","),row.names = F)
+```
+
+
+```{r analyse_ercc_vs_sample_lib_conc,opts.label="code_chunk",dependson="scater_setup"}
+# calculate linear models for ERCC content/library vs sample concentration, add labels
+#
+# set status for linear dependency on sample concentration
+# - at least SignLevel **
+# - at least Adj-RSquared 0.5 **
+# - at least absolute correlation of 0.3
+sampleconc_vs_ercc_lms = sample_info %>% 
+  group_by(Group) %>% 
+  do(fit_linear_model(as.data.frame(.),"pct_counts_ERCC ~ SampleConcentration")) %>%
+  mutate(
+    Label = ifelse(is.na(Correlation),NA,
+                   as.character(as.expression(
+      substitute(italic(r) == c*","~italic(R)^2 == r2*","~p,list(c=round(Correlation,2),r2=round(AdjRsquared,2),p=as.character(SignLevel)))
+      ))),
+    LabelPosX = min(sample_info[as.character(sample_info$Group)==as.character(Group),"SampleConcentration"]),
+    LabelPosY = max(sample_info[as.character(sample_info$Group)==as.character(Group),"pct_counts_ERCC"])
+  ) %>%
+  mutate(LinearDependency = SignLevel>="**" & AdjRsquared>=0.5 & abs(Correlation)>=0.3) %>% as.data.frame()
+rownames(sampleconc_vs_ercc_lms) = sampleconc_vs_ercc_lms$Group
+
+libraryconc_vs_ercc_lms = sample_info %>% 
+  group_by(Group) %>% 
+  do(fit_linear_model(as.data.frame(.),"pct_counts_ERCC ~ LibraryConcentration")) %>%
+  mutate(
+    Label = ifelse(is.na(Correlation),NA,
+                   as.character(as.expression(
+      substitute(italic(r) == c*","~italic(R)^2 == r2*","~p,list(c=round(Correlation,2),r2=round(AdjRsquared,2),p=as.character(SignLevel)))
+      ))),
+    LabelPosX = min(sample_info[as.character(sample_info$Group)==as.character(Group),"LibraryConcentration"]),
+    LabelPosY = max(sample_info[as.character(sample_info$Group)==as.character(Group),"pct_counts_ERCC"])
+  ) %>% 
+  mutate(LinearDependency = SignLevel>="**" & AdjRsquared>=0.5 & abs(Correlation)>=0.3) %>% as.data.frame()
+rownames(libraryconc_vs_ercc_lms) = libraryconc_vs_ercc_lms$Group
+```
+
+```{r ercc_qc_conc_table,opts.label="table_chunk",dependson="analyse_ercc_vs_sample_lib_conc",results="asis"}
+# create table for sample and library concentration correlations
+ercc_qc_conc_table = sampleconc_vs_mito_lms[,c("Group"),drop=F]
+ercc_qc_conc_table$SampleConcDepend = ifelse(!sampleconc_vs_ercc_lms$LinearDependency,"no",
+paste0("r = ",round(sampleconc_vs_ercc_lms$Correlation,2),", *R^2^* = ",round(sampleconc_vs_ercc_lms$AdjRsquared,2),", ",sampleconc_vs_ercc_lms$SignLevel))
+
+ercc_qc_conc_table$LibraryConcDepend = ifelse(!libraryconc_vs_ercc_lms$LinearDependency,"no",
+paste0("r = ",round(libraryconc_vs_ercc_lms$Correlation,2),", *R^2^* = ",round(libraryconc_vs_ercc_lms$AdjRsquared,2),", ",libraryconc_vs_ercc_lms$SignLevel))
+
+kable(ercc_qc_conc_table,col.names=c("Group","Sample concentration","Library concentration"),
+              caption="Correlation between ERCC content and sample/library concentration",digits=0,format.args = list(decimal.mark = ".", big.mark = ","),row.names = F)
+```
+
+
+## Filtered cells
+
+```{r filter_by_suggest_theshold,opts.label="table_chunk",dependson="scater_setup"}
+# filter based on log absolute median deviations for read numbers
+sample_info = as.data.frame(colData(sce))
+num_reads_filters = suggest_nmad_filter_thresholds(sample_info$total_counts,batch=sample_info$Group,nmads=4,log=T,type="both",nonegative=T)
+sce$filter_on_number_of_reads = filtered_by_thresholds(sample_info$total_counts,num_reads_filters,batch=sample_info$Group)
+
+# filter based on log absolute median deviations for gene numbers
+num_genes_filters = suggest_nmad_filter_thresholds(sample_info$total_features,batch=sample_info$Group,nmads=4,log=F,type="both",nonegative=T)
+sce$filter_on_number_of_genes = filtered_by_thresholds(sample_info$total_features,num_genes_filters,batch=sample_info$Group)
+
+# filter based on log absolute median deviations for mitochondrial content
+mito_filters = suggest_nmad_filter_thresholds(sample_info$pct_counts_Mt,batch=sample_info$Group,nmads=4,log=F,type="higher",nonegative=T)
+sce$filter_on_mitochondrial_content = filtered_by_thresholds(sample_info$pct_counts_Mt,mito_filters,batch=sample_info$Group)
+
+# suggested filter for ERCC content: 20%
+ercc_filters = list(lower_limit=0,upper_limit=20)
+sce$filter_on_ercc_content = filtered_by_thresholds(sample_info$pct_counts_ERCC,ercc_filters)
+
+# set filter column
+sce$is_filtered = sce$is_cell_control | sce$filter_on_number_of_reads | sce$filter_on_number_of_genes | sce$filter_on_mitochondrial_content | sce$filter_on_ercc_content
+
+# update sample_info
+sample_info = as.data.frame(colData(sce))
+
+kable(
+  sample_info %>% group_by(Group) %>% summarise(
+    num_cells = length(Group),
+    is_ctrl = sum(is_cell_control)/length(is_cell_control)*100,
+    filter_on_number_of_reads = sum(filter_on_number_of_reads)/length(filter_on_number_of_reads)*100,
+    filter_on_number_of_genes = sum(filter_on_number_of_genes)/length(filter_on_number_of_genes)*100,
+    filter_on_mitochondrial_content = sum(filter_on_mitochondrial_content)/length(filter_on_mitochondrial_content)*100,
+    filter_on_ercc_content = sum(filter_on_ercc_content)/length(filter_on_ercc_content)*100,
+    total_filtered=sum(is_filtered)/length(is_filtered)*100) %>% as.data.frame(),
+  col.names=c("Group","Cells","% filt by control","% filt by reads","% filt by genes","% filt by mito","% filt by ERCC","% total"),
+  caption="Filter results",digits=1,format.args = list(decimal.mark = ".", big.mark = ","))
+```
+
+```{r filtered_cells_venn_overlap,opts.label="plot_chunk",dependson="filter_by_suggest_theshold",fig.cap="Cells filtered by reason shown as venn diagram (controls are not included).",fig.height=2,fig.width=3}
+# diagram will only include samples but not controls
+by_reads = sce$filter_on_number_of_reads[!sce$is_cell_control]
+by_genes = sce$filter_on_number_of_genes[!sce$is_cell_control]
+by_mito = sce$filter_on_mitochondrial_content[!sce$is_cell_control]
+by_ercc = sce$filter_on_ercc_content[!sce$is_cell_control]
+
+library(VennDiagram)
+grid.newpage()
+p=draw.quad.venn(sum(by_reads),sum(by_genes),sum(by_mito),sum(by_ercc),
+               sum(by_reads & by_genes),sum(by_reads & by_mito),sum(by_reads & by_ercc),
+               sum(by_genes & by_mito),sum(by_genes & by_ercc),sum(by_mito & by_ercc),
+               sum(by_reads & by_genes & by_mito),sum(by_reads & by_genes & by_ercc),
+               sum(by_reads & by_mito & by_ercc),sum(by_genes & by_mito & by_ercc),
+               sum(by_reads & by_genes & by_mito & by_ercc),
+               category=c("by reads","by genes","by mito content","by ERCC"),
+               fill=c("blue","green","red","yellow"),ind=T,
+               cex = rep(0.8, 15),cat.cex = rep(0.8, 4)
+               )
+```
+
+```{r final_sce_filtering,opts.label="code_chunk",dependson="filter_by_suggest_theshold"}
+sce_filt = sce[,!sce$is_filtered]
+```
+
+# Supplements
+## Sample overview
+
+```{r sample_conc_by_plate,opts.label="plot_chunk",dependson="setup_done",fig.width=getPlatePlotWidth(num_of_plates),fig.height=getPlatePlotHeight(num_of_plates),eval=have_plates & have_sample_library_conc,fig.cap="Sample concentration by plate: Plate positions are coloured by sample concentration. Labels indicate (B)ulk, (P)ositive and (N)egative controls."}
+plotByPlate(sce,colour_by="SampleConcentration",mark_ctrl=T,ctrl_col="IsControl",ctrl_label="CtrlLabel",ctrl_colour="red",colour_by_legend="Concentration (ng/ul)",rev_colour_scale=T)
+```
+
+```{r library_conc_by_plate,opts.label="plot_chunk",dependson="setup_done",fig.width=getPlatePlotWidth(num_of_plates),fig.height=getPlatePlotHeight(num_of_plates),eval=have_plates & have_sample_library_conc,fig.cap="Library concentration by plate: Plate positions are coloured by library concentration. Labels indicate (B)ulk, (P)ositive and (N)egative controls."}
+plotByPlate(sce,colour_by="LibraryConcentration",mark_ctrl=T,ctrl_col="IsControl",ctrl_label="CtrlLabel",ctrl_colour="red",colour_by_legend="Concentration (ng/ul)",rev_colour_scale=T)
+```
+
+## Quality Control
+### Number of reads
+
+```{r num_reads_by_plate,opts.label="plot_chunk",dependson="run_num_reads_qc",fig.width=getPlatePlotWidth(num_of_plates),fig.height=getPlatePlotHeight(num_of_plates),eval=have_plates,fig.cap="Number of reads by plate: Plate positions are coloured by number of reads. Labels indicate (B)ulk, (P)ositive and (N)egative controls."}
+plotByPlate(sce,colour_by="total_counts",mark_ctrl=T,ctrl_col="IsControl",ctrl_label="CtrlLabel",mark_filtered=F,colour_by_legend = "Reads",rev_colour_scale=T)
+```
+
+```{r reads_sample_cor,opts.label="plot_chunk",fig.width=getGroupPlotWidth(num_of_groups),fig.height=getGroupPlotHeight(num_of_groups),fig.cap="Correlation between sample concentration and read numbers",dependson="analyse_num_reads_vs_sample_lib_conc",eval=have_sample_library_conc}
+ggplot(sample_info,aes(x=SampleConcentration,y=total_counts)) +
+  geom_point(colour="darkgrey") +
+  scale_x_continuous("Sample concentration (ng/ul)") +
+  scale_y_continuous("Number of reads",labels=comma) +
+  geom_abline(data=sampleconc_vs_readnum_lms,aes(intercept=Intercept,slope=Coeff1),colour="blue2",linetype="dashed") +
+  geom_text(data=sampleconc_vs_readnum_lms,aes(x=LabelPosX,y=LabelPosY,label=Label),parse=T,hjust=0,colour="blue2",size=3,vjust=1) +
+  theme_bw(8) +
+  theme(legend.position = "bottom") +
+  facet_wrap(~Group,scales="free",ncol=3)
+```
+
+```{r reads_sample_cor_tbl,opts.label="table_chunk",dependson="analyse_num_reads_vs_sample_lib_conc"}
+kable(sampleconc_vs_readnum_lms[,1:(ncol(sampleconc_vs_readnum_lms)-5)],
+      caption="Correlation between sample concentration and read numbers",digits=3,format.args = list(decimal.mark = ".", big.mark = ","),row.names = F)
+```
+
+```{r reads_library_cor,opts.label="plot_chunk",fig.width=getGroupPlotWidth(num_of_groups),fig.height=getGroupPlotHeight(num_of_groups),fig.cap="Correlation between library concentration and read numbers",dependson="analyse_num_reads_vs_sample_lib_conc",eval=have_sample_library_conc}
+ggplot(sample_info,aes(x=LibraryConcentration,y=total_counts)) +
+  geom_point(colour="darkgrey") +
+  scale_x_continuous("Library concentration (ng/ul)") +
+  scale_y_continuous("Number of reads",labels=comma) +
+  geom_abline(data=libraryconc_vs_readnum_lms,aes(intercept=Intercept,slope=Coeff1),colour="blue2",linetype="dashed") +
+  geom_text(data=libraryconc_vs_readnum_lms,aes(x=LabelPosX,y=LabelPosY,label=Label),parse=T,hjust=0,colour="blue2",size=3,vjust=1) +
+  theme_bw(8) +
+  theme(legend.position = "bottom") +
+  facet_wrap(~Group,scales="free",ncol=3)
+```
+
+```{r reads_library_cor_tbl,opts.label="table_chunk",dependson="analyse_num_reads_vs_sample_lib_conc"}
+kable(libraryconc_vs_readnum_lms[,1:(ncol(libraryconc_vs_readnum_lms)-5)],
+      caption="Correlation between library concentration and read numbers",digits=3,format.args = list(decimal.mark = ".", big.mark = ","),row.names = F)
+```
+
+### Number of genes
+
+```{r num_genes_by_plate,opts.label="plot_chunk",fig.width=getPlatePlotWidth(num_of_plates),fig.height=getPlatePlotHeight(num_of_plates),fig.cap="Gene numbers by plate: Plate positions are coloured by gene numbers. Labels indicate (B)ulk, (P)ositive and (N)egative controls.",dependson="scater_setup",eval=have_plates}
+plotByPlate(sce,colour_by="total_features",mark_ctrl=T,ctrl_col="IsControl",ctrl_label="CtrlLabel",mark_filtered = F,colour_by_legend = "Genes",rev_colour_scale=T)
+```
+
+```{r num_genes_sample_cor,opts.label="plot_chunk",fig.width=getGroupPlotWidth(num_of_groups),fig.height=getGroupPlotHeight(num_of_groups),fig.cap="Correlation between sample concentration and gene numbers",dependson="analyse_num_genes_vs_sample_lib_conc",eval=have_sample_library_conc}
+ggplot(sample_info,aes(x=SampleConcentration,y=total_features)) +
+  geom_point(colour="darkgrey") +
+  scale_x_continuous("Sample concentration (ng/ul)") +
+  scale_y_continuous("Number of genes",labels=comma) +
+  geom_abline(data=sampleconc_vs_genesnum_lms,aes(intercept=Intercept,slope=Coeff1),colour="blue2",linetype="dashed") +
+  geom_text(data=sampleconc_vs_genesnum_lms,aes(x=LabelPosX,y=LabelPosY,label=Label),parse=T,hjust=0,colour="blue2",size=3,vjust=1) +
+  theme_bw(8) +
+  theme(legend.position = "bottom") +
+  facet_wrap(~Group,scales="free",ncol=3)
+```  
+
+```{r num_genes_sample_cor_tbl,opts.label="table_chunk",dependson="analyse_num_genes_vs_sample_lib_conc"}
+kable(sampleconc_vs_genesnum_lms[,1:(ncol(sampleconc_vs_genesnum_lms)-5)],
+      caption="Correlation between sample concentration and gene numbers",digits=3,format.args = list(decimal.mark = ".", big.mark = ","),row.names = F)
+```
+
+```{r num_genes_library_cor,opts.label="plot_chunk",fig.width=getGroupPlotWidth(num_of_groups),fig.height=getGroupPlotHeight(num_of_groups),fig.cap="Correlation between library concentration and gene numbers",dependson="analyse_num_genes_vs_sample_lib_conc",eval=have_sample_library_conc}
+ggplot(sample_info,aes(x=LibraryConcentration,y=total_features)) +
+  geom_point(colour="darkgrey") +
+  scale_x_continuous("Library concentration (ng/ul)") +
+  scale_y_continuous("Number of genes",labels=comma) +
+  geom_abline(data=libraryconc_vs_genesnum_lms,aes(intercept=Intercept,slope=Coeff1),colour="blue2",linetype="dashed") +
+  geom_text(data=libraryconc_vs_genesnum_lms,aes(x=LabelPosX,y=LabelPosY,label=Label),parse=T,hjust=0,colour="blue2",size=3,vjust=1) +
+  theme_bw(8) +
+  theme(legend.position = "bottom") +
+  facet_wrap(~Group,scales="free",ncol=3)
+```
+
+```{r num_genes_library_cor_tbl,opts.label="table_chunk",dependson="analyse_num_genes_vs_sample_lib_conc"}
+kable(libraryconc_vs_genesnum_lms[,1:(ncol(libraryconc_vs_genesnum_lms)-5)],
+      caption="Correlation between library concentration and gene numbers",digits=3,format.args = list(decimal.mark = ".", big.mark = ","),row.names = F)
+```
+
+### Mitchondrial content
+
+```{r mito_content_by_plate,opts.label="plot_chunk",fig.width=getPlatePlotWidth(num_of_plates),fig.height=getPlatePlotHeight(num_of_plates),fig.cap="Mitochondrial content by plate: Plate positions are coloured by mitochondrial content. Labels indicate (B)ulk, (P)ositive and (N)egative controls.",dependson="run_mito_qc",eval=have_plates}
+plotByPlate(sce,colour_by="pct_counts_Mt",mark_ctrl=T,ctrl_col="IsControl",ctrl_label="CtrlLabel",colour_by_legend = "MitoContent",mark_filtered=F,rev_colour_scale=T)
+```
+
+```{r mito_sample_cor,opts.label="plot_chunk",fig.width=getGroupPlotWidth(num_of_groups),fig.height=getGroupPlotHeight(num_of_groups),fig.cap="Correlation between sample concentration and mitochondrial content",dependson="analyse_mito_vs_sample_lib_conc",eval=have_sample_library_conc}
+ggplot(sample_info,aes(x=SampleConcentration,y=pct_counts_Mt)) +
+  geom_point(colour="darkgrey") +
+  scale_x_continuous("Sample concentration (ng/ul)") +
+  scale_y_continuous("Mitochondrial content (%)") +
+  geom_abline(data=sampleconc_vs_mito_lms,aes(intercept=Intercept,slope=Coeff1),colour="blue2",linetype="dashed") +
+  geom_text(data=sampleconc_vs_mito_lms,aes(x=LabelPosX,y=LabelPosY,label=Label),parse=T,hjust=0,colour="blue2",size=3,vjust=1) +
+  theme_bw(8) +
+  theme(legend.position = "bottom") +
+  facet_wrap(~Group,scales="free",ncol=3)
+```
+
+```{r mito_sample_cor_tbl,opts.label="table_chunk",dependson="analyse_mito_vs_sample_lib_conc"}
+kable(sampleconc_vs_mito_lms[,1:(ncol(sampleconc_vs_mito_lms)-5)],
+      caption="Correlation between sample concentration and mitochondrial content",digits=3,format.args = list(decimal.mark = ".", big.mark = ","),row.names = F)
+```
+
+```{r mito_library_cor,opts.label="plot_chunk",fig.width=getGroupPlotWidth(num_of_groups),fig.height=getGroupPlotHeight(num_of_groups),dependson="analyse_mito_vs_sample_lib_conc",fig.cap="Correlation between library concentration and mitochondrial content",eval=have_sample_library_conc}
+ ggplot(sample_info,aes(x=LibraryConcentration,y=pct_counts_Mt)) +
+  geom_point(colour="darkgrey") +
+  scale_x_continuous("Library concentration (ng/ul)") +
+  scale_y_continuous("Mitochondrial content (%)",labels=comma) +
+  geom_abline(data=libraryconc_vs_mito_lms,aes(intercept=Intercept,slope=Coeff1),colour="blue2",linetype="dashed") +
+  geom_text(data=libraryconc_vs_mito_lms,aes(x=LabelPosX,y=LabelPosY,label=Label),parse=T,hjust=0,colour="blue2",size=3,vjust=1) +
+  theme_bw(8) +
+  theme(legend.position = "bottom") +
+  facet_wrap(~Group,scales="free",ncol=3)
+```
+
+```{r mito_library_cor_tbl,opts.label="table_chunk",dependson="analyse_mito_vs_sample_lib_conc"}
+kable(libraryconc_vs_mito_lms[,1:(ncol(libraryconc_vs_mito_lms)-5)],
+      caption="Correlation between library concentration and mitochondrial content",digits=3,format.args = list(decimal.mark = ".", big.mark = ","),row.names = F)
+```
+
+### ERCC
+#### Content
+
+```{r ercc_content_by_plate,opts.label="plot_chunk",fig.width=getPlatePlotWidth(num_of_plates),fig.height=getPlatePlotHeight(num_of_plates),fig.cap="ERCC content by plate: Plate positions are coloured by ERCC content. Labels indicate (B)ulk, (P)ositive and (N)egative controls.",dependson="scater_setup",eval=have_plates}
+plotByPlate(sce,colour_by="pct_counts_ERCC",mark_ctrl=T,ctrl_col="IsControl",ctrl_label="CtrlLabel",colour_by_legend = "ERCC",mark_filtered=F,rev_colour_scale=T)
+```
+
+```{r ercc_sample_cor,opts.label="plot_chunk",fig.width=getGroupPlotWidth(num_of_groups),fig.height=getGroupPlotHeight(num_of_groups),fig.cap="Correlation between sample concentration and ERCC content",dependson="analyse_ercc_vs_sample_lib_conc",eval=have_sample_library_conc}
+ggplot(sample_info,aes(x=SampleConcentration,y=pct_counts_ERCC)) +
+  geom_point(colour="darkgrey") +
+  scale_x_continuous("Sample concentration (ng/ul)") +
+  scale_y_continuous("ERCC content (%)") +
+  geom_abline(data=sampleconc_vs_ercc_lms,aes(intercept=Intercept,slope=Coeff1),colour="blue2",linetype="dashed") +
+  geom_text(data=sampleconc_vs_ercc_lms,aes(x=LabelPosX,y=LabelPosY,label=Label),parse=T,hjust=0,colour="blue2",size=3,vjust=1) +
+  theme_bw(8) +
+  theme(legend.position = "bottom") +
+  facet_wrap(~Group,scales="free",ncol=3)
+```  
+
+```{r ercc_sample_cor_tbl,opts.label="table_chunk",dependson="analyse_ercc_vs_sample_lib_conc"}
+kable(sampleconc_vs_ercc_lms[,1:(ncol(sampleconc_vs_ercc_lms)-5)],
+      caption="Correlation between sample concentration and ERCC content",digits=3,format.args = list(decimal.mark = ".", big.mark = ","),row.names = F)
+```
+
+```{r ercc_library_cor,opts.label="plot_chunk",fig.width=getGroupPlotWidth(num_of_groups),fig.height=getGroupPlotHeight(num_of_groups),fig.cap="Correlation between library concentration and ERCC content",dependson="analyse_ercc_vs_sample_lib_conc",eval=have_sample_library_conc}
+ggplot(sample_info,aes(x=LibraryConcentration,y=pct_counts_ERCC)) +
+  geom_point(colour="darkgrey") +
+  scale_x_continuous("Library concentration (ng/ul)") +
+  scale_y_continuous("ERCC content (%)",labels=comma) +
+  geom_abline(data=libraryconc_vs_ercc_lms,aes(intercept=Intercept,slope=Coeff1),colour="blue2",linetype="dashed") +
+  geom_text(data=libraryconc_vs_ercc_lms,aes(x=LabelPosX,y=LabelPosY,label=Label),parse=T,hjust=0,colour="blue2",size=3,vjust=1) +
+  theme_bw(8) +
+  theme(legend.position = "bottom") +
+  facet_wrap(~Group,scales="free",ncol=3)
+```
+
+```{r ercc_library_cor_tbl,opts.label="table_chunk",dependson="analyse_ercc_vs_sample_lib_conc"}
+kable(libraryconc_vs_ercc_lms[,1:(ncol(libraryconc_vs_ercc_lms)-5)],
+      caption="Correlation between library concentration and ERCC content",digits=3,format.args = list(decimal.mark = ".", big.mark = ","),row.names = F)
+```
+
+#### Distribution
+
+```{r ercc_distribution_plot,opts.label="plot_chunk",dependson="scater_setup",fig.width=7,fig.height=5}
+# ERCC concentration table
+ercc_concentrations_file = "/projects/seq-work/user/all/ERCC/ERCC_Controls_Analysis.txt"
+ercc_concentrations = read.table(ercc_concentrations_file, header = TRUE, sep = "\t",stringsAsFactors = FALSE)
+colnames(ercc_concentrations) = c("num", "id", "subgroup", "conc_mix1", "conc_mix2","expected_fc", "log2_mix1_mix2")
+rownames(ercc_concentrations) = ercc_concentrations$id
+
+ercc_ids = as.character(ercc_concentrations[rownames(ercc_concentrations) %in% rownames(sce),"id"])
+ercc_counts = as.data.frame(as.matrix(counts(sce[ercc_ids,])))
+missing_ercc_ids = as.character(ercc_concentrations[!rownames(ercc_concentrations) %in% rownames(sce),"id"])
+missing_ercc_counts = data.frame(matrix(data=0,nrow=length(missing_ercc_ids),ncol=ncol(ercc_counts)),row.names = missing_ercc_ids)
+colnames(missing_ercc_counts) = colnames(ercc_counts)
+ercc_counts = rbind(ercc_counts,missing_ercc_counts)
+
+ercc_counts$ERCC = factor(rownames(ercc_counts),levels=ercc_concentrations[order(ercc_concentrations$conc_mix1,decreasing = T),"id"])
+ercc_counts = gather(ercc_counts,Sample,Count,-ERCC)
+ercc_counts$Group = sample_info[ercc_counts$Sample,"Group"]
+ercc_counts$Subgroup = paste("subgroup",ercc_concentrations[as.character(ercc_counts$ERCC),"subgroup"])
+ercc_counts$ConcMix1 = ercc_concentrations[as.character(ercc_counts$ERCC),"conc_mix1"]
+
+ggplot(ercc_counts %>% group_by(Group,Subgroup,ERCC) %>%
+  summarise(perc_expressed=sum(Count>0)/length(Count)*100),
+  aes(x=ERCC,y=perc_expressed)) +
+  geom_bar(stat="identity") +
+  scale_x_discrete("ERCC sorted by decreasing spike-in content") +
+  scale_y_continuous("Percentage of cells (%)") +
+  theme_bw(8) +
+  facet_grid(Group~Subgroup,scales="free_x") +
+  theme(axis.text.x = element_text(angle=90,size=rel(0.8),vjust=0.5))
+```
+
+### Observed vs Expected
+
+```{r analyse_ercc_expected_vs_observed,opts.label="code_chunk",dependson="scater_setup"}
+# ERCC concentration table
+ercc_concentrations_file = "/projects/seq-work/user/all/ERCC/ERCC_Controls_Analysis.txt"
+ercc_concentrations = read.table(ercc_concentrations_file, header = TRUE, sep = "\t",stringsAsFactors = FALSE)
+colnames(ercc_concentrations) = c("num", "id", "subgroup", "conc_mix1", "conc_mix2","expected_fc", "log2_mix1_mix2")
+rownames(ercc_concentrations) = ercc_concentrations$id
+ercc_ids = as.character(ercc_concentrations[rownames(ercc_concentrations) %in% rownames(sce),"id"])
+
+# ERCC cpm: recalculate cpm values for ERCC based on total ERCC reads per cell (CORRECT) but not on total reads (WRONG)
+#           since different cell types may have different RNA amounts which may bias ERCC
+ercc_ids = as.character(ercc_concentrations[rownames(ercc_concentrations) %in% rownames(sce),"id"])
+ercc_counts = as.data.frame(as.matrix(counts(sce[ercc_ids,])))
+ercc_norm_factor = colSums(ercc_counts)
+ercc_cpm = as.data.frame(t(t(ercc_counts)/ercc_norm_factor) * 10^6)
+ercc_cpm$ERCC = rownames(ercc_cpm)
+ercc_cpm = gather(ercc_cpm,Sample,Count,-ERCC)
+ercc_cpm$Group = sample_info[ercc_cpm$Sample,"Group"]
+ercc_cpm$ERCC = factor(ercc_cpm$ERCC,levels=ercc_ids)
+
+ercc_cpm$Subgroup = ercc_concentrations[as.character(ercc_cpm$ERCC),"subgroup"]
+ercc_cpm$ConcMix1 = ercc_concentrations[as.character(ercc_cpm$ERCC),"conc_mix1"]
+ercc_cpm$ConcMix2 = ercc_concentrations[as.character(ercc_cpm$ERCC),"conc_mix2"]
+ercc_cpm$Id = ercc_concentrations[as.character(ercc_cpm$ERCC),"id"]
+ercc_cpm$LogCount = log2(ercc_cpm$Count+1)
+ercc_cpm$LogConcMix1 = log2(ercc_cpm$ConcMix1+1)
+
+ercc_cpm_group = ercc_cpm %>% group_by(Group,ERCC) %>% summarise(MeanCount = mean(Count))
+ercc_cpm_group$Subgroup = ercc_concentrations[as.character(ercc_cpm_group$ERCC),"subgroup"]
+ercc_cpm_group$ConcMix1 = ercc_concentrations[as.character(ercc_cpm_group$ERCC),"conc_mix1"]
+ercc_cpm_group$ConcMix2 = ercc_concentrations[as.character(ercc_cpm_group$ERCC),"conc_mix2"]
+ercc_cpm_group$Id = ercc_concentrations[as.character(ercc_cpm_group$ERCC),"id"]
+ercc_cpm_group$LogMeanCount = log2(ercc_cpm_group$MeanCount+1)
+ercc_cpm_group$LogConcMix1 = log2(ercc_cpm_group$ConcMix1+1)
+
+# fit (log) linear models by group
+ercc_cpm_group_lm = ercc_cpm_group %>% 
+  group_by(Group) %>% 
+  do(fit_linear_model(as.data.frame(.),"LogMeanCount ~ LogConcMix1")) %>% 
+  rowwise() %>%
+  mutate(
+    Label = ifelse(is.na(Correlation),NA,
+                   as.character(as.expression(
+      substitute(italic(r) == c*","~italic(R)^2 == r2*","~p,list(c=round(Correlation,2),r2=round(AdjRsquared,2),p=as.character(SignLevel)))
+      ))),
+    LabelPosX = min(ercc_cpm_group[as.character(ercc_cpm_group$Group)==as.character(Group),"LogConcMix1"]),
+    LabelPosY = max(ercc_cpm_group[as.character(ercc_cpm_group$Group)==as.character(Group),"LogMeanCount"])
+  ) %>%
+  mutate(LinearDependency = SignLevel>="**" & AdjRsquared>=0.5 & abs(Correlation)>=0.3) %>% as.data.frame()
+
+# fit (log) linear models by sample
+ercc_cpm_sample_lm = ercc_cpm %>% 
+   group_by(Group,Sample) %>% 
+   do(fit_linear_model(as.data.frame(.),"LogCount ~ LogConcMix1")) %>%
+  rowwise() %>%
+   mutate(
+     Label = ifelse(is.na(Correlation),NA,
+                    as.character(as.expression(
+       substitute(italic(r) == c*","~italic(R)^2 == r2*","~p,list(c=round(Correlation,2),r2=round(AdjRsquared,2),p=as.character(SignLevel)))
+       ))),
+     LabelPosX = min(ercc_cpm[as.character(ercc_cpm$Group)==as.character(Group),"LogConcMix1"]),
+     LabelPosY = max(ercc_cpm[as.character(ercc_cpm$Group)==as.character(Group),"LogCount"])
+   ) %>% 
+   mutate(LinearDependency = SignLevel>="**" & AdjRsquared>=0.5 & abs(Correlation)>=0.3) %>% as.data.frame()
+```
+
+```{r plot_observed_vs_expected_ercc,opts.label="plot_chunk",dependson="analyse_ercc_expected_vs_observed",fig.width=getGroupPlotWidth(num_of_groups),fig.height=getGroupPlotHeight(num_of_groups),}
+ercc_observed_vs_expected_plot = ggplot(ercc_cpm_group,aes(y=LogConcMix1,x=LogMeanCount)) +
+  geom_point(colour="darkgrey") +
+  scale_x_continuous("Expression (log2 cpm)",labels=comma) +
+  scale_y_continuous("ConcMix1 (log2)",labels=comma) +
+  geom_abline(data=ercc_cpm_group_lm,aes(intercept=Intercept,slope=Coeff1),colour="blue2",linetype="dashed") +
+  geom_text(data=ercc_cpm_group_lm,aes(x=LabelPosX,y=LabelPosY,label=Label),parse=T,hjust=0,colour="blue2",size=3,vjust=1) +
+  theme_bw(8) +
+  theme(legend.position = "bottom") +
+  facet_wrap(~Group,scales="free",ncol=3)
+ercc_observed_vs_expected_plot
+```
+
+```{r observed_vs_expected_ercc_intercept_slope,opts.label="plot_chunk",dependson="analyse_ercc_expected_observed",fig.width=7,fig.height=4}
+grid.arrange(
+  ggplot(ercc_cpm_sample_lm,aes(x=Group,y=Intercept)) + 
+  geom_boxplot() +
+  theme_bw(8) +
+  scale_y_continuous("Log2 cpm") +
+  theme(axis.text.x = element_text(angle=45,hjust=1)) +
+  ggtitle("Predicted log2 cpm at log2 ConcMix1 = 0 (intercept)"),
+  ggplot(ercc_cpm_sample_lm,aes(x=Group,y=Coeff1)) + 
+  geom_boxplot() +
+  theme_bw(8) +
+  scale_y_continuous("Log2 cpm") +
+  theme(axis.text.x = element_text(angle=45,hjust=1)) +
+  ggtitle("Predicted log2 cpm increase (slope)"),
+  ggplot(ercc_cpm_sample_lm,aes(x=Group,y=AdjRsquared)) + 
+  geom_boxplot() +
+  theme_bw(8) +
+  scale_y_continuous("Adj. R-squared") +
+  theme(axis.text.x = element_text(angle=45,hjust=1)) +
+  ggtitle("Adj. R-squared"),
+  
+  ncol=2
+)
+```
+
+### Filtered cells
+
+```{r suggested_filter_thresholds,opts.label="table_chunk",dependson="filter_by_suggest_theshold"}
+# format suggested filter thresholds
+suggested_filter_thresholds = data.frame(Group=levels(sample_info$Group))
+suggested_filter_thresholds$LowerNumReads = ifelse(suggested_filter_thresholds$Group %in% names(num_reads_filters),
+        sapply(num_reads_filters[suggested_filter_thresholds$Group],function(x){x$lower_limit}),num_reads_filters$lower_limit)
+suggested_filter_thresholds$UpperNumReads = ifelse(suggested_filter_thresholds$Group %in% names(num_reads_filters),
+        sapply(num_reads_filters[suggested_filter_thresholds$Group],function(x){x$upper_limit}),num_reads_filters$upper_limit)
+suggested_filter_thresholds$LowerNumGenes = ifelse(suggested_filter_thresholds$Group %in% names(num_genes_filters),
+        sapply(num_genes_filters[suggested_filter_thresholds$Group],function(x){x$lower_limit}),num_genes_filters$lower_limit)
+suggested_filter_thresholds$UpperNumGenes = ifelse(suggested_filter_thresholds$Group %in% names(num_genes_filters),
+        sapply(num_genes_filters[suggested_filter_thresholds$Group],function(x){x$upper_limit}),num_genes_filters$upper_limit)
+suggested_filter_thresholds$LowerMito = ifelse(suggested_filter_thresholds$Group %in% names(mito_filters),
+        sapply(mito_filters[suggested_filter_thresholds$Group],function(x){x$lower_limit}),mito_filters$lower_limit)
+suggested_filter_thresholds$UpperMito = ifelse(suggested_filter_thresholds$Group %in% names(mito_filters),
+        sapply(mito_filters[suggested_filter_thresholds$Group],function(x){x$upper_limit}),mito_filters$upper_limit)
+suggested_filter_thresholds$LowerERCC = ifelse(suggested_filter_thresholds$Group %in% names(ercc_filters),
+        sapply(ercc_filters[suggested_filter_thresholds$Group],function(x){x$lower_limit}),ercc_filters$lower_limit)
+suggested_filter_thresholds$UpperERCC = ifelse(suggested_filter_thresholds$Group %in% names(ercc_filters),
+        sapply(ercc_filters[suggested_filter_thresholds$Group],function(x){x$upper_limit}),ercc_filters$upper_limit)
+kable(
+  suggested_filter_thresholds,
+  col.names=c("Group","Min reads","Max reads","Min genes","Max genes","Min Mito(%)","Max Mito(%)","Min ERCC(%)","Max ERCC(%)"),
+  caption="Suggested filter thresholds",digits=1,format.args = list(decimal.mark = ".", big.mark = ","))
+```
+
+
