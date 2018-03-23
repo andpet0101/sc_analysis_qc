@@ -10,8 +10,10 @@
 create_sce_from_countsdata = function(countsdata,drop_zero_genes=T,use_sparse_matrix=F){
   nsets = length(countsdata)
   full_data = vector("list", nsets)
-  countobject_type = c()
+  countobject_source = c()
   countobject_name = c()
+  original_sample_names = c()
+  j = 1
   
   # go through countsdata objects
   for(i in seq_len(nsets)){
@@ -25,38 +27,44 @@ create_sce_from_countsdata = function(countsdata,drop_zero_genes=T,use_sparse_ma
       if(file.exists(countdata_mtx)){
         # 10X
         flog.info("Countsdata object %s is a directory with a 'matrix.mtx' file and therefore interpreted as 10x data.",countsdata[[i]])
-        full_data[[i]] = create_matrix_from_10x(countsdata[[i]],use_sparse_matrix=use_sparse_matrix)
-        data_types[[i]] = "10X"
-        
+        full_data[[i]] = create_matrix_from_10x(countsdata[[i]],use_sparse_matrix=use_sparse_matrix,drop_zero_genes=F)
+        countobject_source = c(countobject_source,rep("10X",ncol(full_data[[i]])))
       }else{
         # kallisto
         flog.info("Countsdata object %s is a directory without a 'matrix.mtx' file and therefore interpreted as kallisto data.",countsdata[[i]])
-        full_data[[i]] = create_matrix_from_kallisto(countsdata[[i]],use_sparse_matrix=use_sparse_matrix)
-        data_types[[i]] = "kallisto"
+        full_data[[i]] = create_matrix_from_kallisto(countsdata[[i]],use_sparse_matrix=use_sparse_matrix,drop_zero_genes=F)
+        countobject_source = c(countobject_source,rep("kallisto",ncol(full_data[[i]])))
       }
-      
     }else{
       # featureCounts
       flog.info("Countsdata object %s is a file and therefore interpreted as featureCounts data.",countsdata[[i]])
-      full_data[[i]] = create_matrix_from_featurecounts(countsdata[[i]],use_sparse_matrix=use_sparse_matrix)
-      data_types[[i]] = "featureCounts"
+      full_data[[i]] = create_matrix_from_featurecounts(countsdata[[i]],use_sparse_matrix=use_sparse_matrix,drop_zero_genes=F)
+      countobject_source = c(countobject_source,rep("featureCounts",ncol(full_data[[i]])))
     }
     
-    # add sample prefix (by countsdata object)
+    # add sample prefix
+    # - either using the name of the countsdata object
+    # - or setting to d1, d2, d3, ... but in this case only when we have multiple datasets
+    original_sample_names = c(original_sample_names,colnames(full_data[[i]]))
     if(!is.null(names(countsdata))){
-      mod_sample_names = paste(names(countsdata)[[i]],colnames(full_data[[i]]),sep="-")
+      sample_prefix = names(countsdata)[[i]]
+      colnames(full_data[[i]]) = paste(sample_prefix,colnames(full_data[[i]]),sep="-")
+      countobject_name = c(countobject_name,rep(sample_prefix,ncol(full_data[[i]])))
     }else{
-      
+      sample_prefix = paste0("d",j)
+      j = j + 1
+      countobject_name = c(countobject_name,rep(sample_prefix,ncol(full_data[[i]])))
+      if(nsets>1){
+        colnames(full_data[[i]]) = paste(sample_prefix,colnames(full_data[[i]]),sep="-")
+      }
     }
-      
-      colnames(full_data[[i]]) = paste(names(countsdata)[[i]],colnames(full_data[[i]]),sep="-")
-    
-    
   }
   
   # drop zero rows
-  nonzero_rows = unique(unlist(lapply(full_data,function(x){rownames(x)[rowSums(x)>0]})))
-  full_data = lapply(my_l,function(x){x[nonzero_rows,]})
+  if(drop_zero_genes){
+    nonzero_rows = unique(unlist(lapply(full_data,function(x){rownames(x)[rowSums(x)>0]})))
+    full_data = lapply(my_l,function(x){x[nonzero_rows,]})
+  }
   
   # add missing data as zero counts and reorder rows 
   all_rownames = sort(unique(unlist(lapply(full_data,row.names))))
@@ -76,13 +84,20 @@ create_sce_from_countsdata = function(countsdata,drop_zero_genes=T,use_sparse_ma
   # create sce object
   sce = SingleCellExperiment(list(counts = full_data))
   
-  # 
+  # add some information regarding the samples
+  sample_info = as.data.frame(colData(sce))
+  sample_info$Name = row.names(sample_info)
+  sample_info$OrigName = factor(original_sample_names)
+  sample_info$Dataset = factor(countobject_name)
+  sample_info$DataSource = factor(countobject_source)
+  colData(sce) = DataFrame(sample_info,row.names = rownames(sample_info))
   
-  # clear countstable and full_data and call gc to free memory
+  # clear full_data and call gc to free memory
   rm(full_data)
+  rm(sample_info)
   gc(verbose=F)
 
-  sce  
+  return(sce)  
 }
 
 #' Creates a matrix object from featureCounts table.
@@ -120,9 +135,7 @@ create_matrix_from_featurecounts = function(featurecounts_file,drop_zero_genes=T
     countdata = countdata[keep, ]
   }
   
-  gc(verbose=F)
-
-  return(sce)  
+  return(countdata)  
 }
 
 #' Creates a matrix object from 10X data.
@@ -134,17 +147,16 @@ create_matrix_from_featurecounts = function(featurecounts_file,drop_zero_genes=T
 #' #' @seealso create_matrix_from_featurecounts,create_matrix_from_kallisto
 #' @examples
 #' sce = create_matrix_from_10x(matrix_dir_from_cellranger)
-create_matrix_from_10x = function(matrix_dir,drop_zero_genes=T){
+create_matrix_from_10x = function(matrix_dir,drop_zero_genes=T,use_sparse_matrix=T){
   require(Matrix)
   require(futile.logger)
-
   
-  if(!dir.exists(matrix_dir)) flog.error("Specified matrix directory",matrix_dir,"does not exist!")
+  if(!dir.exists(matrix_dir)) flog.error("Specified matrix directory %s does not exist!",matrix_dir)
   countdata_mtx = file.path(matrix_dir,'matrix.mtx')
   countdata_cols = file.path(matrix_dir,'barcodes.tsv')
   countdata_rows = file.path(matrix_dir,'genes.tsv')
   
-  if(!file.exists(countdata_mtx) | !file.exists(countdata_cols) | file.exists(countdata_rows)) flog.error("Either matrix.mtx or barcodes.tsv or genes.tsv is missing for matrix directory ",matrix_dir,"!")
+  if(!file.exists(countdata_mtx) | !file.exists(countdata_cols) | file.exists(countdata_rows)) flog.error("Either matrix.mtx or barcodes.tsv or genes.tsv is missing for matrix directory %s !",matrix_dir)
   
   countdata = readMM(countdata_mtx)
   crows = readLines(countdata_rows)[1]
@@ -160,102 +172,62 @@ create_matrix_from_10x = function(matrix_dir,drop_zero_genes=T){
     countdata = countdata[keep, ]
   }
   
-  gc(verbose=F)
-}
-  
-  for(d in matrix_dir){
-    if(!file.exists(d)) stop(paste("Specified matrix directory",d,"does not exist!"))
-    countdata_mtx = file.path(d,'matrix.mtx')
-    countdata_cols = file.path(d,'barcodes.tsv')
-    countdata_rows = file.path(d,'genes.tsv')
-    
-  }
-  
-  nsets = length(matrix_dir)
-  full_data = vector("list", nsets)
-  for(i in seq_len(nsets)){
-    countdata_mtx = file.path(matrix_dir[[i]],'matrix.mtx')
-    countdata_cols = file.path(matrix_dir[[i]],'barcodes.tsv')
-    countdata_rows = file.path(matrix_dir[[i]],'genes.tsv')
-    
-    if(!file.exists(countdata_mtx) | !file.exists(countdata_cols) | file.exists(countdata_rows)){
-      stop(paste("Either matrix.mtx or barcodes.tsv or genes.tsv is missing for",matrix_dir[[i]],"!"))
-    }
-    
-    full_data[[i]] = readMM(countdata_mtx)
-    rownames(full_data[[i]]) = read.table(countdata_rows,sep="\t",header=F,stringsAsFactors = F)$V1
-    colnames(full_data[[i]]) = read.table(countdata_cols,sep="\t",header=F,stringsAsFactors = F)$V1
-    
-    if(use_sparse_matrix) full_data[[i]] = as(full_data[[i]], "dgCMatrix")
-    if(!is.null(names(matrix_dir))) colnames(full_data[[i]]) = paste(names(matrix_dir)[[i]],colnames(full_data[[i]]),sep="-")
-  
-  }
-  
-  # combine all datasets in one table
-  if(any(sapply(full_data,function(x){any(rownames(full_data[[1]])!=rownames(x))}))) stop("Gene information is not the same for all 10x matrix dirs!")
-  
-  countstable = do.call(cbind, full_data)
-  if(any(duplicated(colnames(countstable)))) stop("Multiple cells have the same name. Please rename the cells or - when using multiple datasets with same cell names - use a prefix for each dataset.")
-  
-  # drop fully zero genes
-  if(drop_zero_genes){
-    keep = rowSums(countstable > 0) > 0
-    countstable = countstable[keep, ]
-  }
-  
-  # drop fully zero genes
-  if(drop_zero_genes){
-    keep = rowSumscounts(sce) > 0
-    sce = sce[keep, ]
-  }
-  
-  
-  return(sce)
+  return(countdata)  
 }
 
 #' Creates a matrix object from kallisto.
 #' 
-#' @param kallisto_dir A directory containing the kallisto output (one subdirectory per sample). A vector or named vector can be given in order to load several data directories. If a named vector is given, the cell names will be prefixed with the names.
-#' @param drop_zero_genes drop gene rows with zero counts
-#' @param use_sparse_matrix use a sparse matrix for counts
-#' @return a SingleCellExperiment
-#' #' @seealso create_sce_from_featurecounts,create_sce_from_10xData
+#' @param kallisto_dir A directory containing the kallisto output (one subdirectory per sample).
+#' @param drop_zero_genes Drop gene rows with zero counts.
+#' @param use_sparse_matrix Use a sparse matrix for counts.
+#' @param return_tpm Return tpm instead of counts.
+#' @return A matrix.
+#' #' @seealso create_matrix_from_featurecounts,create_matrix_from_10x
 #' @examples
 #' sce = create_sce_from_featurecounts(featurecounts_file)
-create_sce_from_kallisto = function(kallisto_dir,drop_zero_genes=T,use_sparse_matrix=F){
-  require(scater)
+create_matrix_from_kallisto = function(kallisto_dir,drop_zero_genes=T,use_sparse_matrix=F,return_tpm=F){
+  require(futile.logger)
   require(Matrix)
   
-  # read featureCounts output
-  nsets = length(kallisto_dir)
-  full_data = vector("list", nsets)
-  for(i in seq_len(nsets)){
-    if(!file.exists(kallisto_dir[[i]])) stop(paste("Specified kallisto directory ",kallisto_dir[[i]],"does not exist!"))
-    
-    subdirs = list.dirs(path=kallisto_dir[[i]],full.names=T)
-    kallisto_samples = c()
-    kallisto_subdirs = c()
-    for(l in subdirs){
-      if(l==kallisto_dir[[i]]){next}
-      
-      kallisto_h5 = file.path(l,'abundance.h5')
-      kallisto_tsv = file.path(l,'abundance.tsv')
-      kallisto_run_info = file.path(l,'run_info.json')
-      if(!file.exists(kallisto_h5) | !file.exists(kallisto_tsv) | !file.exists(kallisto_run_info)){next}
-      
-      kallisto_samples = c(kallisto_samples,basename(l))
-      kallisto_subdirs = c(kallisto_subdirs,l)
-    }
-    
-    if(length(kallisto_samples)==0 | length(kallisto_subdirs)==0)stop(paste("No kallisto data found at directory",kallisto_dir[[i]],"!"))
-    
-    kallisto_sce = readKallistoResults(samples = kallisto_samples,directories = kallisto_subdirs,logExprsOffset = 1)
-  }
-
+  if(!dir.exists(kallisto_dir)) flog.error("Specified kallisto directory %s does not exist!",matrix_dir)
   
- 
-  # clear countstable and call gc to free memory
-  gc(verbose=F)
+  subdirs = list.dirs(path=kallisto_dir[[i]],full.names=T)
+  for(l in subdirs){
+    if(l==kallisto_dir[[i]]){next}
+      
+    kallisto_h5 = file.path(l,'abundance.h5')
+    kallisto_tsv = file.path(l,'abundance.tsv')
+    kallisto_run_info = file.path(l,'run_info.json')
+    if(!file.exists(kallisto_h5) | !file.exists(kallisto_tsv) | !file.exists(kallisto_run_info)){next}
+    
+    kallisto_subdirs = c(kallisto_subdirs,l)
+  }
+  if(length(kallisto_subdirs)==0) flor.error("No kallisto data found at directory %s !",kallisto_dir)
+  
+  nsets = length(kallisto_subdirs)
+  full_data = vector("list", nsets)
+  
+  for(i in seq_len(nsets)){
+    kallisto_tsv = file.path(kallisto_subdirs[[i]],'abundance.tsv')
+    abundance = read_table2(kallisto_tsv,col_names=T)
+    
+    if(return_tpm){
+      full_data[[i]] = data.frame(abundance[,c("tpm")],row.names = abundance$target_id)
+    }else{
+      full_data[[i]] = data.frame(abundance[,c("est_counts")],row.names = abundance$target_id)
+    }
+  }
+  
+  countdata = do.call(cbind, full_data)
+  countdata = as.matrix(countdata)
+  if(!use_sparse_matrix) countdata = as.matrix(countdata)
+  
+  if(drop_zero_genes){
+    keep = rowSums(countdata > 0) > 0
+    countdata = countdata[keep, ]
+  }
+  
+  return(countdata)
 }
 
 
@@ -266,48 +238,44 @@ create_sce_from_kallisto = function(kallisto_dir,drop_zero_genes=T,use_sparse_ma
 #' @examples
 #' sce = parse_plate_information(sce)
 parse_plate_information = function(sce){
+  require(futile.logger)
+  require(tidyr)
+  
   sample_info = as.data.frame(colData(sce))
-  samples_with_plate_info = grepl("_\\d\\d\\d*_[A-Z]\\d\\d$",rownames(sample_info))
-
-  # when we have plate_info, add PlateNumber, Row and Col information, otherwise just add the column Sample
-  if(any(samples_with_plate_info)){
-    library(tidyr)
-    if(!all(samples_with_plate_info)) stop("Some samples do not have correct plate information (Name_PlateNumber_RowCol)!")
+  sample_info$Cell__names = rownames(sample_info)
+  sample_info$HavePlateInfo = grepl("_\\d\\d\\d*_[A-Z]\\d\\d$",sample_info$Cell__names)
   
-    sample_info$Row.names = rownames(sample_info)
-    sample_info = separate(sample_info,Row.names,c("Sample","PlateNumberTxt","PlateCoords"),sep=c(-7,-4),remove=F)
-    sample_info$Sample = gsub("(^_)|(_$)","",sample_info$Sample)
-    sample_info$PlateCoords = gsub("(^_)|(_$)","",sample_info$PlateCoords)
-    sample_info$PlateNumberTxt = as.integer(gsub("(^_)|(_$)","",sample_info$PlateNumberTxt))
-    sample_info$PlateNumber = factor(as.integer(sample_info$PlateNumberTxt),ordered=T,levels=sort(unique(as.integer(sample_info$PlateNumberTxt))))
-    sample_info$PlateNumberTxt = NULL
-    sample_info$Row = gsub("[0-9]+$","",sample_info$PlateCoords)
-    
-    if(any(!sample_info$Row %in% c("A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P"))){
-      stop("Some samples have invalid row information!")
-    }
-    
-    if(any(!sample_info$Col>24)){
-      stop("Some samples have invalid column information!")
-    }
-    
-    # 384 vs 96er plate format
-    if("I" %in% sample_info$Row){
-      sample_info$Row = factor(sample_info$Row,levels=c("A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P"),ordered=T)
-    }else{
-      sample_info$Row = factor(sample_info$Row,levels=c("A","B","C","D","E","F","G","H"),ordered=T)
-    }
-    sample_info$Col = as.integer(gsub("^[A-Z]","",sample_info$PlateCoords))
-    if(13 %in%  sample_info$Col){
-      sample_info$Col = factor(sample_info$Col,levels=1:24,ordered=T)
-    }else{
-      sample_info$Col = factor(sample_info$Col,levels=1:12,ordered=T)
-    }
-    
-    sample_info$Row.names = NULL
-    sample_info$PlateCoords = NULL
+  
+  # note: this function is first applied to all cell names and then resulting columns PlateNumberTxt and PlateCoords are set to NA for cell names without plate information
+  sample_info = separate(sample_info,Cell__names,c("Sample","PlateNumberTxt","PlateCoords"),sep=c(-7,-4),remove=F)
+  sample_info$Sample = ifelse(sample_info$HavePlateInfo,gsub("(^_)|(_$)","",sample_info$Sample),sample_info$Cell__names)
+  sample_info$PlateCoords = ifelse(sample_info$HavePlateInfo,gsub("(^_)|(_$)","",sample_info$PlateCoords),NA)
+  sample_info$PlateNumberTxt = as.integer(ifelse(sample_info$HavePlateInfo,gsub("(^_)|(_$)","",sample_info$PlateNumberTxt),NA))
+  sample_info$PlateNumber = factor(sample_info$PlateNumberTxt,ordered=T,levels=sort(unique(sample_info$PlateNumberTxt)))
+  sample_info$PlateNumberTxt = NULL
+  
+  sample_info$Row = gsub("[0-9]+$","",sample_info$PlateCoords)
+  if(any(!is.na(sample_info$Row) & !sample_info$Row %in% c("A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P"))) flog.error("Some samples have invalid row information!")
+  
+  sample_info$Col = gsub("^[A-Z]","",sample_info$PlateCoords)
+  if(any(!is.na(sample_info$Col) & !grepl("^\\d+$",sample_info$Col))) flog.error("Some samples have invalid column information!")
+  sample_info$Col = as.integer(sample_info$Col)
+  if(any(!sample_info$Col %in% 1:24)) flog.error("Some samples have invalid column information!")
+  
+  sample_info$PlateCoords = NULL
+  
+  # 384 vs 96er plate format
+  if("I" %in% sample_info$Row){
+    sample_info$Row = factor(sample_info$Row,levels=c("A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P"),ordered=T)
+  }else{
+    sample_info$Row = factor(sample_info$Row,levels=c("A","B","C","D","E","F","G","H"),ordered=T)
   }
-  
+  if(13 %in%sample_info$Col){
+    sample_info$Col = factor(sample_info$Col,levels=1:24,ordered=T)
+  }else{
+    sample_info$Col = factor(sample_info$Col,levels=1:12,ordered=T)
+  }
+  sample_info$Cell__names = NULL
   colData(sce) = DataFrame(sample_info,row.names = rownames(sample_info))
   
   return(sce)
@@ -330,9 +298,9 @@ assign_group_information = function(sce,group_information=NULL){
   # provided by user
   if(!is.null(group_information)){
     if(any(!sample_info$Cell__names %in% names(group_information))){
-      stop("Some cell names are not in the user-provided group information!")
+      flog.error("Some cell names are not in the user-provided group information!")
     }
-    sample_info$Group = group_information[sample_info$Cell__names]
+    sample_info$Group = group_information[as.character(sample_info$Cell__names)]
     sample_info$ControlType = factor(ifelse(!sample_info$Group %in% c("NegCtrl","PosCtrl","BulkCtrl"),"Sample",sample_info$Group),
                                      levels=c("Sample","BulkCtrl","PosCtrl","NegCtrl"))
     sample_info$IsControl = !sample_info$ControlType=="Sample"
