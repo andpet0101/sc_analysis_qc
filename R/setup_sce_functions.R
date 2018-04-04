@@ -289,10 +289,12 @@ parse_plate_information = function(sce){
 #' @examples
 #' sce = assign_group_information(sce)
 assign_group_information = function(sce,group_information=NULL){
+  require(futile.logger)
+  
   sample_info = as.data.frame(colData(sce))
   
   # column sample gives the cell name without plate information (if available); otherwise row names are sufficient 
-  if("Sample" %in% colnames(sample_info)){ sample_info$Cell__names = sample_info$Sample
+  if("Sample" %in% colnames(sample_info)){sample_info$Cell__names = sample_info$Sample
   }else{sample_info$Cell__names = rownames(sample_info)}
   
   # provided by user
@@ -326,7 +328,7 @@ assign_group_information = function(sce,group_information=NULL){
   group_levels = c(sort(group_levels[!group_levels %in% c("BulkCtrl","PosCtrl","NegCtrl")]),c("BulkCtrl","PosCtrl","NegCtrl"))
   sample_info$Group = factor(sample_info$Group,levels=group_levels)
 
-  sample_info$Cell__names= NULL
+  sample_info$Cell__names = NULL
   colData(sce) = DataFrame(sample_info,row.names = rownames(sample_info))
   
   return(sce)
@@ -343,11 +345,16 @@ assign_group_information = function(sce,group_information=NULL){
 #' @examples
 #' sce = fetch_sample_library_info_from_labweb(sce,'bfx123')
 fetch_sample_library_info_from_labweb = function(sce,bfxid=NULL,db_conf_file="/group/sequencing/Bfx/scripts/andreas/perl/db_sampledb1_config.txt"){
+  require(futile.logger)
+  require(magrittr)
+  
   sample_info = as.data.frame(colData(sce))
   sample_info$Cell__names = rownames(sample_info)
-
+  
+  sample_library_info = c()
+  
   if(is.null(bfxid)){
-    stop("The bfxid is missing for LabWeb query!")
+    flog.error("The bfxid is missing for querying the LabWeb!")
   }
   bfxid = gsub("^bfx","",bfxid)
   
@@ -357,12 +364,12 @@ fetch_sample_library_info_from_labweb = function(sce,bfxid=NULL,db_conf_file="/g
     
     # parse and check conf file
     if(!file.exists(db_conf_file)){
-      stop(paste("MySQL configuration file",db_conf_file,"does not exist!"))
+      flog.error("MySQL configuration file %s does not exist!",db_conf_file)
     }
     db_conf = readLines(db_conf_file) %>% grep ("=",.,value=T) %>% strsplit(.,split="=")
     db_conf = setNames(trimws(sapply(db_conf, `[[`, 2)),trimws(sapply(db_conf, `[[`, 1)))
     if(any(!c('dbi','host','user','pass','db') %in% names(db_conf))){
-      stop(paste("MySQL configuration file",db_conf_file," is missing 'dbi', 'host', 'user','pass' or 'db' entry!"))
+      flog.error("MySQL configuration file %s is missing 'dbi', 'host', 'user','pass' or 'db' entry!",db_conf_file)
     }
     
     # connect to db and query
@@ -384,20 +391,13 @@ fetch_sample_library_info_from_labweb = function(sce,bfxid=NULL,db_conf_file="/g
     dbDisconnect(mydb)
     
     if(nrow(sample_library_info)==0){
-      stop("Fetching sample/library information from the LabWeb was not successfull!")
+      flog.error("Fetching sample/library information from the LabWeb was not successfull!")
     }
     
   }else{
-    warning("RMySQL not installed. All columns will be set to NA.")
+    flog.info("RMySQL not installed. All columns will be set to NA.")
   }
   
-  # match db sample names to cell names
-  # a) chromium: many cells belong to one sample, in this case
-  if(any(grepl("[ACGT]{10,}",sample_info$Cell__names))){
-    
-  }
-  
-  # b) Smartseq2: one cell belongs to one sample
   
   
   # check if we have information for all samples
@@ -408,7 +408,7 @@ fetch_sample_library_info_from_labweb = function(sce,bfxid=NULL,db_conf_file="/g
     sample_library_concs$SampleConcentration = as.numeric(sample_library_concs$SampleConcentration)
     sample_info$SampleConcentration = sample_library_concs[sample_info$Cell__names,"SampleConcentration"]
   }else{
-    warning("Cannot find all samples in LabWeb database. Sample/library concentrations will be set NA.")
+    flog.info("Cannot find all samples in LabWeb database. Sample/library concentrations will be set NA.")
     sample_info$SampleConcentration = NA
     sample_library_concs$LibraryConcentration = NA
   }
@@ -416,7 +416,6 @@ fetch_sample_library_info_from_labweb = function(sce,bfxid=NULL,db_conf_file="/g
   sample_info$Cell__names = NULL
   
   colData(sce) = DataFrame(sample_info,row.names=rownames(sample_info))
-  
   return(sce)
 }
 

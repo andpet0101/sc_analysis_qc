@@ -43,7 +43,7 @@ if(length(datasets_arg)==0) stop(paste0(script,": Please specify at least one da
 source_dir = normalizePath(file.path(normalizePath(parsed_args$options$sourcedir)),mustWork = FALSE)
 if(!dir.exists(source_dir)) stop(paste0(script,": The source directory ",source_dir," with the R and Rmd files does not exist!"))
 
-main_rmd_file = file.path(source_dir,'Rmd','ha.Rmd')
+main_rmd_file = file.path(source_dir,'Rmd','sc_analysis_qc.Rmd')
 if(!file.exists(main_rmd_file)) stop(paste0(script,": The main Rmd file ",main_rmd_file," for rendering the report does not exist!"))
 
 working_dir = normalizePath(file.path(parsed_args$options$workingdir),mustWork = FALSE)
@@ -81,6 +81,7 @@ print(list_of_datasets)
 #                    annotation = parsed_args$options$annotation,
 #                    species = parsed_args$options$species,
 #                    workingdir = working_dir,
-#                    sourcedir = 
+#                    sourcedir = source_dir,
+#                    countsdata = list_of_datasets
 #                    )
 #))

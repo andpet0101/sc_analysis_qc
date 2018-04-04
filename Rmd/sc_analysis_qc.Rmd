@@ -50,9 +50,9 @@ show_code = F
 `r ifelse(show_code,"# Initial code","")`
 `r ifelse(show_code,"## Configuration","")`
 
-<!-- Knitr configuration chunk; should always be first and should not be cached -->
-```{r knitr_configuration, include=show_code,echo=show_code,cache=F,tidy=T}
-############ knitr ############ 
+<!-- general configuration chunk; should always be first and should not be cached -->
+```{r general_configuration, include=show_code,echo=show_code,cache=F,tidy=T}
+############ general configuration ############ 
 library(knitr)
 
 # working directory
@@ -65,20 +65,26 @@ if('workingdir' %in% names(params)){
 opts_knit$set(root.dir = params$workingdir)
 
 # source directory
-if('workingdir' %in% names(params)){
-  if(!file.exists(params$workingdir))stop("Specified working directory does not exist!")
-  workingdir = params$workingdir
+if('sourcedir' %in% names(params)){
+  if(!file.exists(params$sourcedir))stop("Specified source directory does not exist!")
+  sourcedir = params$sourcedir
 }else{
-  stop("Please specify a working directory!")
+  stop("Please specify a source directory!")
 }
-opts_knit$set(root.dir = params$workingdir)
 
 # this should guarantee read/write permission for user and group
 Sys.umask(mode=0002)
 
-# pdf directory (do not change; set for fig.path)
-pdfdir = file.path('figures');
+# avoids some nasty pitfalls
+options(stringsAsFactors = FALSE)
+
+# figures directory for individual plots
+pdfdir = file.path(working_dir,'figures');
 dir.create(pdfdir, showWarnings = FALSE)
+
+# data directory for tables etc.
+datadir = file.path(working_dir,'data')
+dir.create(datadir, showWarnings = FALSE)
 
 # global knitr options: output and include commands, errors, warnings and messages? ; also cache chunks
 opts_chunk$set(echo=show_code,include=show_code,error=F,warning = F,message=F,cache=T)
@@ -96,29 +102,24 @@ opts_template$set(table_chunk=list(include=T,results="asis"))
 options(knitr.table.format='pandoc',knitr.table.digits=0,knitr.table.format.args = list(decimal.mark = ".", big.mark = ","))
 
 # knitr: base path to search for rmarkdown child documents
-rmarkdown_dir = file.path('rmarkdown/')
+rmarkdown_dir = file.path(sourcedir,'Rmd/')
 opts_knit$set(child.path=rmarkdown_dir)
+
+# base path for additional R files to include
+r_include_dir = file.path(sourcedir,"R/")
 
 # this is a (strange) hack to inject a new figure environment into latex
 #
-# the code is written into the file custom_figure_environment.tex which is then included into the tex file
+# the code is written into the file custom_figure_environment.tex which is then included by pandoc into the tex file
 # as specified by the YAML header
 tex_lines = c('\\usepackage{float}','\\let\\origfigure\\figure','\\let\\endorigfigure\\endfigure',
 '\\renewenvironment{figure}[1][2] {\\expandafter\\origfigure\\expandafter[H]}{\\endorigfigure}')
-writeLines(tex_lines,'custom_figure_environment.tex')
-
+writeLines(tex_lines,file.path(workingdir,'custom_figure_environment.tex'))
 ```
 
-<!-- general configuration chunk -->
-```{r configuration, opts.label='code_chunk'}
+<!-- parameter configuration chunk -->
+```{r parameter_configuration, opts.label='code_chunk'}
 ############ configuration ############ 
-library(gridExtra)
-library(scater)
-library(dplyr)
-library(Matrix)
-
-# avoids some nasty pitfalls
-options(stringsAsFactors = FALSE)
 
 # project-specific params
 if(!exists('params')) stop(paste("Please provide a 'params' section in the YAML header of this file or use rmarkdown::render to run this file with parameters!"))
@@ -128,39 +129,32 @@ if(!'species' %in% names(params))stop("Missing a species ('species') entry in th
 species = params$species
 
 # config parameter: annotation
-if(!'annotation' %in% names(params))stop("Missing a annotation version ('annotation') entry in the 'params' section! Can be an Ensembl version or a path to a file.")
-annotation = as.integer(params$annotation)
+if(!'annotation' %in% names(params))stop("Missing a annotation version ('annotation') entry in the 'params' section! Can be an Ensembl version or a path to a file with custom annotations.")
+annotation = params$annotation
 
 # config parameter: bfxid
 if(!'bfxid' %in% names(params))stop("Missing a bfx id ('bfxid') entry in the 'params' section!")
 bfxid = tolower(params$bfxid)
-if(!grepl('^bfx\\d+$',bfxid))stop("Bfx id has to be of format bfx[0-9]+.")
+if(!grepl('^bfx\\d+$',bfxid))stop("Bfx id has to be of format 'bfx[0-9]+'.")
 
 # config parameter: countdata
 if(!'countsdata' %in% names(params))stop("Missing a counts table ('countsdata') entry in the 'params' section!")
 countsdata = params$countsdata
-
-# data directory for tables etc.
-datadir = file.path('data')
-dir.create(datadir, showWarnings = FALSE)
-
-# read in R codes
-read_chunk(file.path(rmarkdown_dir,'setup_sce_singlecell_object.R'),labels='setup_sce_functions.R')
-```
-
-<!-- additional functions: run R code chunk additional_functions -->
-`r ifelse(show_code,"## Additional functions","")`
-```{r setup_sce_functions,opts.label="code_chunk",dependson='configuration'}
-source(file.path(rmarkdown_dir,'setup_sce_functions.R'))
 ```
 
 <!-- setup of scater object and compute basic QC -->
 `r ifelse(show_code,"## Scater object","")`
 ```{r scater_setup, opts.label="code_chunk",dependson='setup_sce_functions'}
+# source neccessary functions
+source(file.path(r_include_dir,'setup_sce_functions.R'))
 
 # create sce object
-sce = create_sce_from_featurecounts(countsdata) %>% 
-  parse_plate_information() %>% 
+sce = create_sce_from_countsdata(countsdata) 
+
+# parse plate information (if available)
+sce = parse_plate_information(sce) 
+
+%>% 
   assign_group_information() %>%
   fetch_sample_library_info_from_labweb(bfxid=bfxid) %>%
   add_gene_annotation(annotation=annotation,species=species)
